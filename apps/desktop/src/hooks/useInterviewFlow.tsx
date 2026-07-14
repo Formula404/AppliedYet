@@ -1,6 +1,13 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { applications as initialApplications } from "../data/mock";
 import type { Application } from "../types";
+import {
+  createApplication as persistApplication,
+  hasLocalDatabase,
+  listApplications,
+  updateApplicationStage as persistApplicationStage,
+  type CreateApplicationInput,
+} from "../services/applications";
 
 export interface ExperienceLink {
   id: string;
@@ -46,8 +53,12 @@ interface InterviewFlowValue {
   experienceLinks: ExperienceLink[];
   sessions: InterviewSession[];
   selectedApplicationId: string;
+  applicationsLoading: boolean;
+  applicationsError: string | null;
   setSelectedApplicationId: (id: string) => void;
   updateApplicationStage: (id: string, stage: string, stageTone: Application["stageTone"]) => void;
+  createApplication: (input: CreateApplicationInput) => Promise<Application>;
+  refreshApplications: () => Promise<void>;
   importExperienceLink: (applicationId: string, url: string) => string;
   addManualExperience: (applicationId: string, title: string, questions: string[]) => string;
   analyzeExperienceLink: (id: string) => void;
@@ -83,7 +94,9 @@ const reviewedQuestion = (id: string, prompt: string, answer: string, score: num
 });
 
 export function InterviewFlowProvider({ children }: { children: ReactNode }) {
-  const [applications, setApplications] = useState<Application[]>(() => initialApplications.map((item) => ({ ...item })));
+  const [applications, setApplications] = useState<Application[]>(() => hasLocalDatabase ? [] : initialApplications.map((item) => ({ ...item })));
+  const [applicationsLoading, setApplicationsLoading] = useState(hasLocalDatabase);
+  const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const [selectedApplicationId, setSelectedApplicationId] = useState("ant");
   const [experienceLinks, setExperienceLinks] = useState<ExperienceLink[]>([
     { id: "link-ant-1", applicationId: "ant", source: "link", url: "https://www.nowcoder.com/discuss/ant-backend", title: "蚂蚁后端一面经验整理", importedAt: "今天 10:24", status: "已提取", questions: experienceQuestions },
@@ -108,6 +121,27 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     },
   ]);
 
+  const refreshApplications = useCallback(async () => {
+    if (!hasLocalDatabase) return;
+    setApplicationsLoading(true);
+    try {
+      const items = await listApplications();
+      setApplications(items);
+      setSelectedApplicationId((current) => items.some((item) => item.id === current) ? current : (items[0]?.id || ""));
+      setApplicationsError(null);
+    } catch (error) {
+      setApplicationsError(String(error));
+      throw error;
+    } finally {
+      setApplicationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasLocalDatabase) return;
+    refreshApplications().catch(() => undefined);
+  }, [refreshApplications]);
+
   const eligibleApplications = useMemo(() => applications.filter(isInterviewEligible), [applications]);
 
   const value = useMemo<InterviewFlowValue>(() => ({
@@ -116,12 +150,42 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     experienceLinks,
     sessions,
     selectedApplicationId,
+    applicationsLoading,
+    applicationsError,
+    refreshApplications,
     setSelectedApplicationId,
     updateApplicationStage: (id, stage, stageTone) => {
+      const previous = applications.find((item) => item.id === id);
       setApplications((current) => current.map((item) => item.id === id ? { ...item, stage, stageTone, updated: "刚刚" } : item));
+      if (hasLocalDatabase) {
+        persistApplicationStage(id, stage).catch((error) => {
+          if (previous) setApplications((current) => current.map((item) => item.id === id ? previous : item));
+          setApplicationsError(String(error));
+        });
+      }
       if ((stage.includes("拒绝") || stage.toLowerCase().includes("offer")) && selectedApplicationId === id) {
         const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
         if (next) setSelectedApplicationId(next.id);
+      }
+    },
+    createApplication: async (input) => {
+      if (!hasLocalDatabase) {
+        const created: Application = {
+          id: makeId("application"), company: input.companyName, companyMark: input.companyName[0] || "?",
+          role: input.positionTitle, city: input.location || "未填写", stage: "已投递", stageTone: "blue",
+          priority: "中", nextStep: "待安排", nextTime: "待安排", progress: 1, updated: "刚刚",
+        };
+        setApplications((current) => [created, ...current]);
+        return created;
+      }
+      try {
+        const created = await persistApplication(input);
+        setApplications((current) => [created, ...current]);
+        setApplicationsError(null);
+        return created;
+      } catch (error) {
+        setApplicationsError(String(error));
+        throw error;
       }
     },
     importExperienceLink: (applicationId, url) => {
@@ -175,7 +239,7 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         })),
       }));
     },
-  }), [applications, eligibleApplications, experienceLinks, selectedApplicationId, sessions]);
+  }), [applications, applicationsError, applicationsLoading, eligibleApplications, experienceLinks, refreshApplications, selectedApplicationId, sessions]);
 
   return <InterviewFlowContext.Provider value={value}>{children}</InterviewFlowContext.Provider>;
 }

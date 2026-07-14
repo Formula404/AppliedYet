@@ -36,3 +36,57 @@ export interface TaskItemData {
   tone: StatusTone;
   overdue?: boolean;
 }
+
+export interface ApplicationTask {
+  id: string;
+  title: string;
+  description?: string;
+  priority: number;
+  status: "todo" | "doing" | "done" | "canceled";
+  dueAt?: string;
+  remindAt?: string;
+  applicationStage?: string;
+  sourceType: string;
+  completedAt?: string;
+  createdAt: string;
+}
+
+export interface ApplicationEvent {
+  id: string;
+  eventType: string;
+  title: string;
+  content?: string;
+  sourceType: "manual" | "email" | "ai" | "system";
+  stageBefore?: string;
+  stageAfter?: string;
+  happenedAt: string;
+  reversible: boolean;
+  revertedAt?: string;
+}
+
+export interface ApplicationDetail {
+  id: string;
+  companyName: string;
+  companyShortName?: string;
+  industry?: string;
+  companyType?: string;
+  website?: string;
+  companyNotes?: string;
+  positionTitle: string;
+  department?: string;
+  location?: string;
+  recruitmentType?: string;
+  jobCode?: string;
+  sourceUrl?: string;
+  jdRaw?: string;
+  appliedAt?: string;
+  channel?: string;
+  priority: number;
+  currentStage: string;
+  nextAction?: string;
+  nextActionDueAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  tasks: ApplicationTask[];
+  events: ApplicationEvent[];
+}

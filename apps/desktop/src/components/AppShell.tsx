@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, FileCheck2, Inbox, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
-import { applications, mails } from "../data/mock";
+import { mails } from "../data/mock";
 import TitleBar from "./TitleBar";
 import { useTheme } from "../hooks/useTheme";
+import { useInterviewFlow } from "../hooks/useInterviewFlow";
 
 const nav = [
   ["/", "日历", CalendarDays], ["/applications", "我的投递", BriefcaseBusiness], ["/emails", "招聘邮件", Inbox],
@@ -20,6 +21,7 @@ export default function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { mode, setMode } = useTheme();
+  const { applications } = useInterviewFlow();
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
