@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Check, ChevronRight, ExternalLink, Link2, PencilLine, Play, Sparkles } from "lucide-react";
 import { Badge, Card, CardHeader } from "../../components/ui";
 import { useInterviewFlow } from "../../hooks/useInterviewFlow";
+import { hasLocalDatabase } from "../../services/applications";
+import { generateInterviewPreparation, getLatestInterviewPreparation, listApplicationAiCalls, type AiCallSummary, type StoredInterviewPreparation } from "../../services/ai";
 
 const isValidWebUrl = (value: string) => {
   try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
@@ -17,10 +19,22 @@ export default function PreparationPage() {
   const [manualTitle, setManualTitle] = useState("");
   const [manualQuestions, setManualQuestions] = useState("");
   const [expandedLinkId, setExpandedLinkId] = useState<string>();
+  const [preparation, setPreparation] = useState<StoredInterviewPreparation | null>(null);
+  const [aiCalls, setAiCalls] = useState<AiCallSummary[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [aiError, setAiError] = useState("");
   const selected = eligibleApplications.find((item) => item.id === selectedApplicationId) ?? eligibleApplications[0];
   const links = experienceLinks.filter((item) => item.applicationId === selected?.id);
   const extractedCount = links.reduce((sum, item) => sum + item.questions.length, 0);
   const validUrl = isValidWebUrl(url.trim());
+  const traceCall = preparation ? aiCalls.find((item) => item.id === preparation.aiCallId) : undefined;
+
+  useEffect(() => {
+    if (!hasLocalDatabase || !selected?.id) { setPreparation(null); setAiCalls([]); return; }
+    Promise.all([getLatestInterviewPreparation(selected.id), listApplicationAiCalls(selected.id)])
+      .then(([latest, calls]) => { setPreparation(latest); setAiCalls(calls); setAiError(""); })
+      .catch((reason) => setAiError(String(reason)));
+  }, [selected?.id]);
 
   if (!selected) return <Card><div className="interview-empty"><Link2 size={32}/><h3>当前没有需要准备的岗位</h3><p>已拒绝或已获得 Offer 的投递不会出现在这里。</p></div></Card>;
 
@@ -42,6 +56,16 @@ export default function PreparationPage() {
     setManualQuestions("");
   };
 
+  const generatePreparation = async () => {
+    if (selected.resumeName && !window.confirm(`将把“${selected.resumeName}”的结构化内容和当前岗位 JD 发送给已配置的 AI 服务，用于简历匹配与面试准备。是否继续？`)) return;
+    setGenerating(true); setAiError("");
+    try {
+      const generated = await generateInterviewPreparation(selected.id);
+      setPreparation(generated);
+      setAiCalls(await listApplicationAiCalls(selected.id));
+    } catch (reason) { setAiError(String(reason)); } finally { setGenerating(false); }
+  };
+
   return <div className="prep-workspace">
     <Card className="prep-jobs">
       <div className="prep-jobs-head"><strong>进行中的岗位</strong><span>{eligibleApplications.length}</span></div>
@@ -61,6 +85,20 @@ export default function PreparationPage() {
         <div><Badge tone={selected.stageTone}>{selected.stage}</Badge><h2>{selected.company} · {selected.role}</h2><p>{selected.city} · 面经链接及提取题目仅归属于当前投递</p></div>
         <button className="button button--primary" onClick={() => navigate("/mock-interview")}><Play size={16}/>用此岗位开始模拟</button>
       </div>
+
+      <Card className="ai-preparation-card">
+        <CardHeader title="AI 面试准备建议" subtitle="使用当前投递的 JD、关联简历与岗位上下文，结果和来源会保存在本地"/>
+        <div className="ai-preparation-toolbar"><div><Sparkles size={18}/><span>{preparation ? `上次生成：${new Date(preparation.createdAt).toLocaleString("zh-CN")} · ${preparation.model}` : "尚未生成真实建议"}</span></div><button className="button button--primary" disabled={generating || !hasLocalDatabase} onClick={generatePreparation}><Sparkles size={15}/>{generating ? "生成中…" : preparation ? "重新生成" : "生成准备建议"}</button></div>
+        {aiError && <p className="field-error ai-preparation-error">{aiError}</p>}
+        {!hasLocalDatabase && <p className="link-import-note">请在 Tauri 桌面模式中使用真实 AI Provider。</p>}
+        {preparation && <div className="ai-preparation-result">
+          <p className="ai-preparation-summary">{preparation.content.summary}</p>
+          {preparation.content.resumeMatch && <section className="ai-predicted-questions"><h3>简历匹配分析</h3><article><b>✓</b><div><strong>{preparation.content.resumeMatch.summary}</strong><p>匹配优势：{preparation.content.resumeMatch.strengths.join("；") || "暂无明确优势"}</p><p>表述风险：{preparation.content.resumeMatch.risks.join("；") || "暂未发现"}</p><small>建议准备证据：{preparation.content.resumeMatch.evidenceToPrepare.join("；") || "暂无"}</small></div></article></section>}
+          <div className="ai-preparation-columns"><section><h3>重点准备</h3>{preparation.content.focusAreas.map((item) => <article key={item.title}><Badge tone={item.priority === "high" ? "red" : item.priority === "medium" ? "orange" : "blue"}>{item.priority === "high" ? "高" : item.priority === "medium" ? "中" : "低"}</Badge><div><strong>{item.title}</strong><p>{item.reason}</p></div></article>)}</section><section><h3>行动计划</h3>{preparation.content.actionPlan.map((item) => <article key={item.action}><span className="ai-action-time">{item.estimatedMinutes} 分钟</span><div><strong>{item.action}</strong></div></article>)}</section></div>
+          <section className="ai-predicted-questions"><h3>预测问题</h3>{preparation.content.predictedQuestions.map((item, index) => <article key={`${index}-${item.question}`}><b>{index + 1}</b><div><strong>{item.question}</strong><p>{item.rationale}</p><small>依据：{item.sourceBasis.join(" · ")}</small></div></article>)}</section>
+          <div className="ai-trace"><span>调用 ID：{preparation.aiCallId.slice(0, 8)}</span><span>来源项：{preparation.sources.length}</span>{traceCall && <span>{traceCall.attempts} 次尝试 · {traceCall.durationMs ?? 0} ms</span>}</div>
+        </div>}
+      </Card>
 
       <Card className="link-import-card">
         <div className="experience-import-tabs"><button className={importMode === "link" ? "active" : ""} onClick={() => setImportMode("link")}><Link2 size={15}/>网页链接</button><button className={importMode === "manual" ? "active" : ""} onClick={() => setImportMode("manual")}><PencilLine size={15}/>人工录入</button></div>

@@ -14,6 +14,9 @@ export interface Application {
   progress: number;
   updated: string;
   risk?: string;
+  archived?: boolean;
+  resumeProfileId?: string;
+  resumeName?: string;
 }
 
 export interface MailItem {
@@ -87,6 +90,11 @@ export interface ApplicationDetail {
   nextActionDueAt?: string;
   createdAt: string;
   updatedAt: string;
+  archivedAt?: string;
+  resumeProfileId?: string;
+  resumeName?: string;
+  resumeFileFormat?: string;
+  resumeTargetDirection?: string;
   tasks: ApplicationTask[];
   events: ApplicationEvent[];
 }

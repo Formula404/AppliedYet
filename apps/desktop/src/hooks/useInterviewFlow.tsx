@@ -5,6 +5,7 @@ import {
   createApplication as persistApplication,
   hasLocalDatabase,
   listApplications,
+  setApplicationArchived as persistApplicationArchived,
   updateApplicationStage as persistApplicationStage,
   type CreateApplicationInput,
 } from "../services/applications";
@@ -45,6 +46,7 @@ interface CreateMockOptions {
   questionCount: number;
   useExperience: boolean;
   useAi: boolean;
+  resumeQuestions?: string[];
 }
 
 interface InterviewFlowValue {
@@ -59,6 +61,7 @@ interface InterviewFlowValue {
   updateApplicationStage: (id: string, stage: string, stageTone: Application["stageTone"]) => void;
   createApplication: (input: CreateApplicationInput) => Promise<Application>;
   refreshApplications: () => Promise<void>;
+  archiveApplication: (id: string, archived: boolean) => Promise<void>;
   importExperienceLink: (applicationId: string, url: string) => string;
   addManualExperience: (applicationId: string, title: string, questions: string[]) => string;
   analyzeExperienceLink: (id: string) => void;
@@ -69,7 +72,7 @@ interface InterviewFlowValue {
 
 const InterviewFlowContext = createContext<InterviewFlowValue | null>(null);
 const isInterviewEligible = (application: Application) =>
-  !application.stage.includes("拒绝") && !application.stage.toLowerCase().includes("offer");
+  !application.archived && !application.stage.includes("拒绝") && !application.stage.toLowerCase().includes("offer");
 const makeId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 const experienceQuestions = [
@@ -153,6 +156,14 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     applicationsLoading,
     applicationsError,
     refreshApplications,
+    archiveApplication: async (id, archived) => {
+      if (hasLocalDatabase) {
+        await persistApplicationArchived(id, archived);
+        await refreshApplications();
+      } else {
+        setApplications((current) => current.map((item) => item.id === id ? { ...item, archived } : item));
+      }
+    },
     setSelectedApplicationId,
     updateApplicationStage: (id, stage, stageTone) => {
       const previous = applications.find((item) => item.id === id);
@@ -203,12 +214,12 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     analyzeExperienceLink: (id) => {
       setExperienceLinks((current) => current.map((item) => item.id === id ? { ...item, status: "已提取", questions: experienceQuestions } : item));
     },
-    createMockSession: ({ applicationId, questionCount, useExperience, useAi }) => {
+    createMockSession: ({ applicationId, questionCount, useExperience, useAi, resumeQuestions: generatedResumeQuestions }) => {
       const id = makeId("mock");
       const imported = experienceLinks.filter((link) => link.applicationId === applicationId && link.status === "已提取").flatMap((link) => link.questions);
       const pool = [
         ...(useExperience ? imported.map((prompt) => ({ prompt, source: "面经" as const })) : []),
-        ...(useAi ? resumeQuestions.map((prompt) => ({ prompt, source: "AI 简历题" as const })) : []),
+        ...(useAi ? (generatedResumeQuestions?.length ? generatedResumeQuestions : resumeQuestions).map((prompt) => ({ prompt, source: "AI 简历题" as const })) : []),
       ];
       const questions = Array.from({ length: questionCount }, (_, index): InterviewQuestion => ({
         id: `${id}-q${index + 1}`,

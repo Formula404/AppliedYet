@@ -8,6 +8,7 @@ export interface CreateApplicationInput {
   channel?: string;
   appliedAt?: string;
   jdRaw?: string;
+  resumeProfileId?: string;
 }
 
 export const hasLocalDatabase = isTauri();
@@ -24,7 +25,7 @@ export function updateApplicationStage(id: string, stage: string) {
   return invoke<void>("update_application_stage", { id, stage });
 }
 
-export type UpdateApplicationDetailInput = Omit<ApplicationDetail, "id" | "createdAt" | "updatedAt" | "tasks" | "events">;
+export type UpdateApplicationDetailInput = Omit<ApplicationDetail, "id" | "createdAt" | "updatedAt" | "archivedAt" | "tasks" | "events">;
 
 export interface CreateTaskInput {
   title: string;
@@ -55,6 +56,22 @@ export function createApplicationTask(applicationId: string, input: CreateTaskIn
 
 export function setApplicationTaskStatus(taskId: string, status: ApplicationTask["status"]) {
   return invoke<ApplicationTask>("set_application_task_status", { taskId, status });
+}
+
+export function updateApplicationTask(taskId: string, input: CreateTaskInput) {
+  return invoke<ApplicationTask>("update_application_task", { taskId, input });
+}
+
+export function deleteApplicationTask(taskId: string) {
+  return invoke<void>("delete_application_task", { taskId });
+}
+
+export function setApplicationArchived(id: string, archived: boolean) {
+  return invoke<void>("set_application_archived", { id, archived });
+}
+
+export function revertApplicationEvent(eventId: string) {
+  return invoke<ApplicationDetail>("revert_application_event", { eventId });
 }
 
 export function createApplicationEvent(applicationId: string, input: CreateEventInput) {

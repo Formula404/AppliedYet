@@ -14,7 +14,7 @@ export const stageToneMap: Record<string, string> = {
   "在线测评": "orange",
   "面试中": "purple",
   "等待结果": "gray",
-  "已获Offer": "green",
+  "已获Offer": "teal",
   "已拒绝": "red",
 };
 

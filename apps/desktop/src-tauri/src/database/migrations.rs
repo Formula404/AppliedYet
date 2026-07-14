@@ -1,0 +1,33 @@
+pub(super) const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "001_init", include_str!("../../migrations/001_init.sql")),
+    (
+        2,
+        "002_application_detail",
+        include_str!("../../migrations/002_application_detail.sql"),
+    ),
+    (
+        3,
+        "003_task_notifications",
+        include_str!("../../migrations/003_task_notifications.sql"),
+    ),
+    (
+        4,
+        "004_provider_settings",
+        include_str!("../../migrations/004_provider_settings.sql"),
+    ),
+    (
+        5,
+        "005_ai_pipeline",
+        include_str!("../../migrations/005_ai_pipeline.sql"),
+    ),
+    (
+        6,
+        "006_resume_profiles",
+        include_str!("../../migrations/006_resume_profiles.sql"),
+    ),
+    (
+        7,
+        "007_resume_workflow",
+        include_str!("../../migrations/007_resume_workflow.sql"),
+    ),
+];

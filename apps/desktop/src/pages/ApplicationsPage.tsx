@@ -6,6 +6,8 @@ import { columnStages, stageToneMap } from "../data/mock";
 import { Badge, Card, PageHeader } from "../components/ui";
 import type { Application } from "../types";
 import { useInterviewFlow } from "../hooks/useInterviewFlow";
+import { showToast } from "../services/toast";
+import { listResumeProfiles, type ResumeProfile } from "../services/resumes";
 
 const columns = [
   { label: "已投递", match: ["投递"] },
@@ -50,7 +52,7 @@ function DraggableCard({ app, onOpen }: { app: Application; onOpen: () => void }
       </div>
       {app.risk && <p className="risk-note">! {app.risk}</p>}
       <div className="application-foot">
-        <span>{app.priority}优先级</span>
+        <span>{app.resumeName ? `简历：${app.resumeName}` : `${app.priority}优先级`}</span>
         <time>{app.updated}更新</time>
         <button type="button" className="application-detail-link" onClick={onOpen}>详情</button>
       </div>
@@ -88,20 +90,24 @@ function RejectedDroppable({ children }: { children: React.ReactNode }) {
 }
 
 export default function ApplicationsPage() {
-  const { applications: apps, applicationsLoading, applicationsError, createApplication, updateApplicationStage } = useInterviewFlow();
+  const { applications: apps, applicationsLoading, applicationsError, archiveApplication, createApplication, updateApplicationStage } = useInterviewFlow();
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const [view, setView] = useState<"board" | "list">("board");
   const [query, setQuery] = useState("");
   const [showNew, setShowNew] = useState(params.get("new") === "1");
-  const [created, setCreated] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [resumes, setResumes] = useState<ResumeProfile[]>([]);
 
   useEffect(() => { setShowNew(params.get("new") === "1"); }, [params]);
+  useEffect(() => { if (showNew) listResumeProfiles().then((items) => setResumes(items.filter((item) => !item.archivedAt))).catch((reason) => showToast(String(reason), "error")); }, [showNew]);
+  useEffect(() => { if (applicationsError) showToast(`本地数据操作失败：${applicationsError}`, "error"); }, [applicationsError]);
 
+  const activeApps = useMemo(() => apps.filter((item) => !item.archived), [apps]);
+  const archivedApps = useMemo(() => apps.filter((item) => item.archived), [apps]);
   const filtered = useMemo(
-    () => apps.filter(a => `${a.company}${a.role}${a.city}`.toLowerCase().includes(query.toLowerCase())),
-    [query, apps],
+    () => activeApps.filter(a => `${a.company}${a.role}${a.city}`.toLowerCase().includes(query.toLowerCase())),
+    [query, activeApps],
   );
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -113,7 +119,7 @@ export default function ApplicationsPage() {
 
     const application = apps.find((item) => item.id === active.id);
     if (!application || application.stage === newStage) return;
-    updateApplicationStage(application.id, newStage, (stageToneMap[target] || application.stageTone) as Application["stageTone"]);
+    updateApplicationStage(application.id, newStage, (stageToneMap[newStage] || application.stageTone) as Application["stageTone"]);
   };
 
   const close = () => { setShowNew(false); setParams({}); };
@@ -132,8 +138,6 @@ export default function ApplicationsPage() {
         </div>
       </div>
       {applicationsLoading && <div className="success-banner">正在读取本地数据库…</div>}
-      {applicationsError && <div className="success-banner">本地数据操作失败：{applicationsError}</div>}
-      {created && <div className="success-banner">已创建投递，后续可在岗位详情中补充 JD 与简历版本。<button onClick={() => setCreated(false)}><X size={15} /></button></div>}
       {view === "board" ? (
         <DndContext onDragEnd={handleDragEnd}>
           <div className="kanban">
@@ -169,7 +173,7 @@ export default function ApplicationsPage() {
           <table>
             <thead>
               <tr>
-                <th>公司 / 岗位</th><th>地点</th><th>当前阶段</th><th>下一步</th><th>优先级</th><th>最近更新</th><th>操作</th>
+                <th>公司 / 岗位</th><th>地点</th><th>当前阶段</th><th>使用简历</th><th>下一步</th><th>优先级</th><th>最近更新</th><th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -178,6 +182,7 @@ export default function ApplicationsPage() {
                   <td><span className="company-logo">{app.companyMark}</span><span><strong>{app.company}</strong><small>{app.role}</small></span></td>
                   <td>{app.city}</td>
                   <td><Badge tone={app.stageTone}>{app.stage}</Badge></td>
+                  <td>{app.resumeName || "未关联"}</td>
                   <td>{app.nextStep}<small>{app.nextTime}</small></td>
                   <td>{app.priority}</td>
                   <td>{app.updated}</td>
@@ -188,6 +193,10 @@ export default function ApplicationsPage() {
           </table>
         </Card>
       )}
+      {archivedApps.length > 0 && <Card className="archived-applications">
+        <div className="archived-applications-head"><div><h3>已归档投递</h3><span>{archivedApps.length} 项</span></div><small>归档记录不参与首页统计和提醒</small></div>
+        <div>{archivedApps.map((app) => <div className="archived-application-row" key={app.id}><span className="company-logo">{app.companyMark}</span><button onClick={() => navigate(`/applications/${app.id}`)}><strong>{app.company}</strong><small>{app.role} · {app.city}</small></button><Badge tone="gray">{app.stage}</Badge><button className="button button--secondary" onClick={() => archiveApplication(app.id, false)}>恢复</button></div>)}</div>
+      </Card>}
       {showNew && (
         <div className="modal-backdrop">
           <div className="dialog application-dialog">
@@ -207,9 +216,10 @@ export default function ApplicationsPage() {
                   channel: String(data.get("channel") || ""),
                   appliedAt: String(data.get("appliedAt") || ""),
                   jdRaw: String(data.get("jdRaw") || ""),
+                  resumeProfileId: String(data.get("resumeProfileId") || "") || undefined,
                 });
                 close();
-                setCreated(true);
+                showToast("已创建投递并关联简历版本。");
               } catch {
                 // 数据层已记录可展示的错误信息，保留表单供用户修改后重试。
               } finally {
@@ -222,7 +232,7 @@ export default function ApplicationsPage() {
                 <label><span>工作地点</span><input name="location" placeholder="杭州" /></label>
                 <label><span>投递渠道</span><select name="channel"><option>招聘官网</option><option>Boss 直聘</option><option>内推</option><option>其他</option></select></label>
                 <label><span>投递日期</span><input name="appliedAt" type="date" defaultValue={new Date().toLocaleDateString("en-CA")} /></label>
-                <label><span>使用简历</span><select><option>后端开发-2026.07</option><option>通用版-2026.06</option></select></label>
+                <label><span>使用简历</span><select key={resumes.map((item) => item.id).join("|")} name="resumeProfileId" defaultValue={resumes.find((item) => item.isPrimary)?.id ?? ""}><option value="">暂不关联</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>{resume.name}{resume.targetDirection ? ` · ${resume.targetDirection}` : ""}{resume.isPrimary ? "（默认）" : ""}</option>)}</select></label>
                 <label className="full"><span>JD 原文</span><textarea name="jdRaw" rows={5} placeholder="粘贴岗位描述，后续将用于岗位准备与问题预测" /></label>
               </div>
               <div className="dialog-actions">
