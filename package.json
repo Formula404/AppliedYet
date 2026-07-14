@@ -1,0 +1,12 @@
+{
+  "name": "tou-le-ma",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npm --prefix apps/desktop run dev",
+    "build": "npm --prefix apps/desktop run build",
+    "preview": "npm --prefix apps/desktop run preview",
+    "typecheck": "npm --prefix apps/desktop run typecheck",
+    "tauri": "npm --prefix apps/desktop run tauri"
+  }
+}
