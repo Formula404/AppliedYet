@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { getCurrentWindow, currentMonitor, PhysicalPosition, PhysicalSize } from "@tauri-apps/api/window";
+import { useCallback, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const win = getCurrentWindow();
 
@@ -23,7 +23,7 @@ function RestoreIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
       <rect x="1" y="2.5" width="7.5" height="7.5" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.2" />
-      <rect x="3" y="0.5" width="7.5" height="7.5" rx="0.8" fill="#fff" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="3" y="0.5" width="7.5" height="7.5" rx="0.8" fill="var(--surface)" stroke="currentColor" strokeWidth="1.2" />
     </svg>
   );
 }
@@ -39,43 +39,54 @@ function CloseIcon() {
 export default function TitleBar() {
   const [maximized, setMaximized] = useState(false);
   const [focused, setFocused] = useState(true);
-  const [restoreRect, setRestoreRect] = useState({ x: 0, y: 0, width: 1440, height: 900 });
+  const [changingWindowState, setChangingWindowState] = useState(false);
+
+  const syncMaximizedState = useCallback(async () => {
+    setMaximized(await win.isMaximized());
+  }, []);
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void)[] = [];
+    const unlisten: (() => void)[] = [];
     (async () => {
-      unlisten.push(await win.onFocusChanged(({ payload }) => {
-        if (!disposed) setFocused(payload);
-      }));
+      const [initialMaximized, initialFocused, stopFocusListener, stopResizeListener] = await Promise.all([
+        win.isMaximized(),
+        win.isFocused(),
+        win.onFocusChanged(({ payload }) => {
+          if (!disposed) setFocused(payload);
+        }),
+        win.onResized(() => {
+          if (!disposed) void syncMaximizedState();
+        }),
+      ]);
+
+      if (disposed) {
+        stopFocusListener();
+        stopResizeListener();
+        return;
+      }
+
+      setMaximized(initialMaximized);
+      setFocused(initialFocused);
+      unlisten.push(stopFocusListener, stopResizeListener);
     })().catch((error) => console.error("无法初始化窗口控制", error));
 
     return () => {
       disposed = true;
       unlisten.forEach((fn) => fn());
     };
-  }, []);
+  }, [syncMaximizedState]);
 
   const handleToggleMaximize = async () => {
+    if (changingWindowState) return;
+    setChangingWindowState(true);
     try {
-      if (maximized) {
-        await win.setSize(new PhysicalSize(restoreRect.width, restoreRect.height));
-        await win.setPosition(new PhysicalPosition(restoreRect.x, restoreRect.y));
-        setMaximized(false);
-      } else {
-        const pos = await win.outerPosition();
-        const size = await win.outerSize();
-        setRestoreRect({ x: pos.x, y: pos.y, width: size.width, height: size.height });
-
-        const monitor = await currentMonitor();
-        if (monitor) {
-          await win.setPosition(monitor.workArea.position);
-          await win.setSize(monitor.workArea.size);
-        }
-        setMaximized(true);
-      }
+      await win.toggleMaximize();
+      await syncMaximizedState();
     } catch (error) {
       console.error("窗口最大化/还原失败", error);
+    } finally {
+      setChangingWindowState(false);
     }
   };
 
@@ -98,7 +109,7 @@ export default function TitleBar() {
         <button type="button" className="tb-btn" onClick={() => void win.minimize()} aria-label="最小化" title="最小化">
           <MinusIcon />
         </button>
-        <button type="button" className="tb-btn" onClick={handleToggleMaximize} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
+        <button type="button" className="tb-btn" onClick={handleToggleMaximize} disabled={changingWindowState} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
           {maximized ? <RestoreIcon /> : <MaximizeIcon />}
         </button>
         <button type="button" className="tb-btn tb-close" onClick={() => void win.close()} aria-label="关闭" title="关闭">

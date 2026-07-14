@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Columns3, Filter, GripVertical, LayoutList, MapPin, Plus, Search, X } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { DndContext, type DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
-import { applications as initialApps, columnStages, stageToneMap } from "../data/mock";
+import { columnStages, stageToneMap } from "../data/mock";
 import { Badge, Card, PageHeader } from "../components/ui";
 import type { Application } from "../types";
+import { useInterviewFlow } from "../hooks/useInterviewFlow";
 
 const columns = [
   { label: "已投递", match: ["投递"] },
@@ -85,12 +86,12 @@ function RejectedDroppable({ children }: { children: React.ReactNode }) {
 }
 
 export default function ApplicationsPage() {
+  const { applications: apps, updateApplicationStage } = useInterviewFlow();
   const [params, setParams] = useSearchParams();
   const [view, setView] = useState<"board" | "list">("board");
   const [query, setQuery] = useState("");
   const [showNew, setShowNew] = useState(params.get("new") === "1");
   const [created, setCreated] = useState(false);
-  const [apps, setApps] = useState<Application[]>(() => initialApps.map(a => ({ ...a })));
 
   useEffect(() => { setShowNew(params.get("new") === "1"); }, [params]);
 
@@ -106,11 +107,9 @@ export default function ApplicationsPage() {
     const newStage = columnStages[target];
     if (!newStage) return;
 
-    setApps(prev => prev.map(a => {
-      if (a.id !== active.id) return a;
-      if (a.stage === newStage) return a;
-      return { ...a, stage: newStage, stageTone: (stageToneMap[target] || a.stageTone) as Application["stageTone"] };
-    }));
+    const application = apps.find((item) => item.id === active.id);
+    if (!application || application.stage === newStage) return;
+    updateApplicationStage(application.id, newStage, (stageToneMap[target] || application.stageTone) as Application["stageTone"]);
   };
 
   const close = () => { setShowNew(false); setParams({}); };

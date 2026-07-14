@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, FileCheck2, Home, Inbox, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
+import { BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, FileCheck2, Inbox, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
 import { applications, mails } from "../data/mock";
 import TitleBar from "./TitleBar";
 import { useTheme } from "../hooks/useTheme";
 
 const nav = [
-  ["/", "首页", Home], ["/applications", "我的投递", BriefcaseBusiness], ["/emails", "招聘邮件", Inbox],
+  ["/", "日历", CalendarDays], ["/applications", "我的投递", BriefcaseBusiness], ["/emails", "招聘邮件", Inbox],
   ["/preparation", "面试准备", BookOpenCheck], ["/mock-interview", "模拟面试", Mic2], ["/reviews", "面试复盘", FileCheck2],
   ["/question-bank", "个人题库", Sparkles], ["/offers", "Offer", CircleDollarSign], ["/analytics", "数据分析", BarChart3], ["/settings", "设置", Settings],
 ] as const;

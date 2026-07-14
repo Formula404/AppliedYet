@@ -9,3 +9,4 @@ target/
 .env.local
 src-tauri/gen/
 **/gen/
+docs/
