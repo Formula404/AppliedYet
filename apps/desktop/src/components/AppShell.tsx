@@ -45,7 +45,7 @@ export default function AppShell() {
   return <div className={`app-shell ${collapsed ? "is-collapsed" : ""}`}>
     <TitleBar />
     <aside className="sidebar">
-      <div className="brand"><div className="brand-mark"><Check size={22} strokeWidth={3} /></div><div className="brand-copy"><strong>投了吗</strong><span>Applied Yet?</span></div></div>
+      <div className="brand"><img className="brand-mark" src="/icon.png" alt="投了吗" /><div className="brand-copy"><strong>投了吗</strong><span>Applied Yet?</span></div></div>
       <nav>{nav.map(([to, label, Icon]) => <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Icon size={19} /><span>{label}</span>{label === "招聘邮件" && <em>2</em>}</NavLink>)}</nav>
       <div className="streak-card"><span>连续记录</span><strong>32 <small>天</small></strong><div><span>本周投递 18</span><b>较上周 +6</b></div><div className="mini-bars">{[4,8,5,13,8,16,12,18,10,15,22,13,17,9].map((h,i)=><i key={i} style={{height:h}} />)}</div></div>
       <button className="collapse-button" onClick={() => setCollapsed(!collapsed)} aria-label="折叠侧边栏"><Menu size={18} /></button>

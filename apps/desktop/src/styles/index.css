@@ -265,10 +265,7 @@ textarea:focus-visible {
   width: 41px;
   height: 41px;
   border-radius: 12px;
-  background: linear-gradient(145deg, #2f6bff, #2459d9);
-  display: grid;
-  place-items: center;
-  color: #fff;
+  object-fit: cover;
   box-shadow: 0 6px 14px rgba(47, 107, 255, .22)
 }
 
