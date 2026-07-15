@@ -10,3 +10,9 @@ target/
 src-tauri/gen/
 **/gen/
 .docs/
+docs/
+
+# Local temp / config
+F:temp_diff_rust_ts.txt
+.claude/
+.agents/
