@@ -11,6 +11,7 @@ src-tauri/gen/
 **/gen/
 .docs/
 docs/
+marketing/
 
 # Local temp / config
 F:temp_diff_rust_ts.txt

@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { hasLocalDatabase } from "./applications";
+import { createDemoResume, deleteDemoResume, listDemoResumes, primaryDemoResume, replaceDemoResume } from "../data/demo";
 
 export interface ResumeProfile {
   id: string;
@@ -45,11 +47,11 @@ export interface ResumeImportResult {
   warning?: string;
 }
 
-export const listResumeProfiles = () => invoke<ResumeProfile[]>("list_resume_profiles");
+export const listResumeProfiles = () => hasLocalDatabase ? invoke<ResumeProfile[]>("list_resume_profiles") : listDemoResumes();
 export const importResumeProfile = (path: string, confirmAiSend = false) => invoke<ResumeImportResult>("import_resume_profile", { input: { path, confirmAiSend: Boolean(confirmAiSend) } });
-export const updateResumeProfile = (id: string, input: UpdateResumeProfileInput) => invoke<ResumeProfile>("update_resume_profile", { id, input });
-export const setPrimaryResumeProfile = (id: string) => invoke<void>("set_primary_resume_profile", { id });
-export const deleteResumeProfile = (id: string) => invoke<void>("delete_resume_profile", { id });
-export const duplicateResumeProfile = (id: string) => invoke<ResumeProfile>("duplicate_resume_profile", { id });
-export const setResumeProfileArchived = (id: string, archived: boolean) => invoke<void>("set_resume_profile_archived", { id, archived });
-export const createBlankResumeProfile = (name: string) => invoke<ResumeProfile>("create_blank_resume_profile", { name });
+export const updateResumeProfile = (id: string, input: UpdateResumeProfileInput) => hasLocalDatabase ? invoke<ResumeProfile>("update_resume_profile", { id, input }) : replaceDemoResume(id, input);
+export const setPrimaryResumeProfile = (id: string) => hasLocalDatabase ? invoke<void>("set_primary_resume_profile", { id }) : primaryDemoResume(id);
+export const deleteResumeProfile = (id: string) => hasLocalDatabase ? invoke<void>("delete_resume_profile", { id }) : deleteDemoResume(id);
+export const duplicateResumeProfile = async (id: string) => hasLocalDatabase ? invoke<ResumeProfile>("duplicate_resume_profile", { id }) : createDemoResume(`${(await listDemoResumes()).find((item) => item.id === id)?.name || "简历"} · 副本`, (await listDemoResumes()).find((item) => item.id === id));
+export const setResumeProfileArchived = (id: string, archived: boolean) => hasLocalDatabase ? invoke<void>("set_resume_profile_archived", { id, archived }) : replaceDemoResume(id, { archivedAt: archived ? new Date().toISOString() : undefined }).then(() => undefined);
+export const createBlankResumeProfile = (name: string) => hasLocalDatabase ? invoke<ResumeProfile>("create_blank_resume_profile", { name }) : createDemoResume(name);

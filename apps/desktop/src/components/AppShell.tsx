@@ -55,7 +55,6 @@ export default function AppShell() {
   const todayLabel = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(currentDate);
 
   const refreshNotifications = async () => {
-    if (!hasLocalDatabase) { setNotificationTasks([]); setEmailMessages([]); return; }
     setNotificationsLoading(true);
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -116,7 +115,6 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (!hasLocalDatabase) return;
     const loadIdentity = () => listResumeProfiles().then((profiles) => {
       const profile = profiles.find((item) => item.isPrimary) ?? profiles[0];
       setSurname(profile ? surnameFromName(resumeName(profile.personalInfo)) : "");
@@ -127,7 +125,7 @@ export default function AppShell() {
   }, [location.pathname]);
 
   useEffect(() => {
-    if (!hasLocalDatabase || applicationsLoading) return;
+    if (applicationsLoading) return;
     getActivitySummary().then(setActivity).catch(() => setActivity(emptyActivity));
   }, [applications, applicationsLoading, location.pathname]);
 
@@ -196,8 +194,9 @@ export default function AppShell() {
       <header className="topbar">
         <button className="search-trigger" onClick={() => setSearchOpen(true)}><Search size={18}/><span>搜索公司、岗位、邮件、面试记录…</span><kbd>Ctrl K</kbd></button>
         <div className="top-actions">
+          {!hasLocalDatabase && <span className="demo-mode-badge" title="与桌面应用数据库完全隔离，刷新页面可恢复预置数据">演示数据</span>}
           <span className="today"><CalendarDays size={17}/>{todayLabel}</span>
-          <button className="button button--secondary sync-button" disabled={!hasLocalDatabase || syncing} onClick={sync}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "正在同步…" : "检查邮件"}</button>
+          <button className="button button--secondary sync-button" disabled={syncing} onClick={sync}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "正在同步…" : "检查邮件"}</button>
           <button className="icon-button" aria-label="主题切换" title={`主题：${mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统"}`} onClick={() => setMode(mode === "light" ? "dark" : mode === "dark" ? "system" : "light")}>{mode === "light" ? <Sun size={18}/> : mode === "dark" ? <Moon size={18}/> : <Monitor size={18}/>}</button>
           <div className="notification-anchor" ref={notificationRef}><button className={`icon-button ${notificationOpen ? "active" : ""}`} aria-label="通知" aria-expanded={notificationOpen} onClick={() => { const next=!notificationOpen;setNotificationOpen(next);if(next)void refreshNotifications(); }}><Bell size={19}/>{notificationCount>0&&<i/>}</button>{notificationOpen&&notificationContent}</div>
           <button className="user-button" onClick={() => navigate("/settings")} title="前往我的简历"><span>{surname || "我"}</span><b>{surname ? `${surname}同学` : "我的资料"}</b><ChevronDown size={14}/></button>

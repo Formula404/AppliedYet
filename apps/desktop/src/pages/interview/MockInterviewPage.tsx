@@ -36,9 +36,9 @@ export default function MockInterviewPage() {
     setGenerating(true); setAiError("");
     try {
       let generated: string[] | undefined;
-      if (useAi && hasLocalDatabase) {
+      if (useAi) {
         if (!resumeReady) throw new Error("当前投递尚未关联简历，请先在投递详情中选择简历版本");
-        if (!window.confirm(`将把“${selected.resumeName || "关联简历"}”和岗位信息发送给 AI，生成本场简历深挖题。是否继续？`)) return;
+        if (hasLocalDatabase && !window.confirm(`将把“${selected.resumeName || "关联简历"}”和岗位信息发送给 AI，生成本场简历深挖题。是否继续？`)) return;
         generated = (await generateResumeQuestions(selected.id, count)).map((item) => item.question);
       }
       const id = createMockSession({ applicationId: selected.id, questionCount: count, useExperience: experienceSelected, useAi, resumeQuestions: generated });

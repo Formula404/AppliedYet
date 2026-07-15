@@ -34,7 +34,7 @@ export default function HomePage() {
   const [month, setMonth] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedDate, setSelectedDate] = useState(today);
   const [data, setData] = useState<DashboardData>(emptyDashboard);
-  const [loading, setLoading] = useState(hasLocalDatabase);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -46,10 +46,6 @@ export default function HomePage() {
   }, []);
 
   const load = useCallback(async () => {
-    if (!hasLocalDatabase) {
-      setData(emptyDashboard());
-      return;
-    }
     setLoading(true);
     setError("");
     const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);

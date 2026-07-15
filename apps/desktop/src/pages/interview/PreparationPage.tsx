@@ -30,7 +30,7 @@ export default function PreparationPage() {
   const traceCall = preparation ? aiCalls.find((item) => item.id === preparation.aiCallId) : undefined;
 
   useEffect(() => {
-    if (!hasLocalDatabase || !selected?.id) { setPreparation(null); setAiCalls([]); return; }
+    if (!selected?.id) { setPreparation(null); setAiCalls([]); return; }
     Promise.all([getLatestInterviewPreparation(selected.id), listApplicationAiCalls(selected.id)])
       .then(([latest, calls]) => { setPreparation(latest); setAiCalls(calls); setAiError(""); })
       .catch((reason) => setAiError(String(reason)));
@@ -57,7 +57,7 @@ export default function PreparationPage() {
   };
 
   const generatePreparation = async () => {
-    if (selected.resumeName && !window.confirm(`将把“${selected.resumeName}”的结构化内容和当前岗位 JD 发送给已配置的 AI 服务，用于简历匹配与面试准备。是否继续？`)) return;
+    if (hasLocalDatabase && selected.resumeName && !window.confirm(`将把“${selected.resumeName}”的结构化内容和当前岗位 JD 发送给已配置的 AI 服务，用于简历匹配与面试准备。是否继续？`)) return;
     setGenerating(true); setAiError("");
     try {
       const generated = await generateInterviewPreparation(selected.id);
@@ -88,9 +88,9 @@ export default function PreparationPage() {
 
       <Card className="ai-preparation-card">
         <CardHeader title="AI 面试准备建议" subtitle="使用当前投递的 JD、关联简历与岗位上下文，结果和来源会保存在本地"/>
-        <div className="ai-preparation-toolbar"><div><Sparkles size={18}/><span>{preparation ? `上次生成：${new Date(preparation.createdAt).toLocaleString("zh-CN")} · ${preparation.model}` : "尚未生成真实建议"}</span></div><button className="button button--primary" disabled={generating || !hasLocalDatabase} onClick={generatePreparation}><Sparkles size={15}/>{generating ? "生成中…" : preparation ? "重新生成" : "生成准备建议"}</button></div>
+        <div className="ai-preparation-toolbar"><div><Sparkles size={18}/><span>{preparation ? `上次生成：${new Date(preparation.createdAt).toLocaleString("zh-CN")} · ${preparation.model}` : "尚未生成真实建议"}</span></div><button className="button button--primary" disabled={generating} onClick={generatePreparation}><Sparkles size={15}/>{generating ? "生成中…" : preparation ? "重新生成" : "生成准备建议"}</button></div>
         {aiError && <p className="field-error ai-preparation-error">{aiError}</p>}
-        {!hasLocalDatabase && <p className="link-import-note">请在 Tauri 桌面模式中使用真实 AI Provider。</p>}
+        {!hasLocalDatabase && <p className="link-import-note">浏览器演示模式使用预置 AI 结果，不会发送任何真实简历或岗位数据。</p>}
         {preparation && <div className="ai-preparation-result">
           <p className="ai-preparation-summary">{preparation.content.summary}</p>
           {preparation.content.resumeMatch && <section className="ai-predicted-questions"><h3>简历匹配分析</h3><article><b>✓</b><div><strong>{preparation.content.resumeMatch.summary}</strong><p>匹配优势：{preparation.content.resumeMatch.strengths.join("；") || "暂无明确优势"}</p><p>表述风险：{preparation.content.resumeMatch.risks.join("；") || "暂未发现"}</p><small>建议准备证据：{preparation.content.resumeMatch.evidenceToPrepare.join("；") || "暂无"}</small></div></article></section>}

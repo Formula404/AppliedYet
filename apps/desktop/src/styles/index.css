@@ -945,6 +945,20 @@ textarea:focus-visible {
   overflow-y: auto
 }
 
+.demo-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--purple) 35%, var(--border));
+  border-radius: 999px;
+  color: var(--purple);
+  background: color-mix(in srgb, var(--purple) 8%, var(--surface));
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 /* 文本框允许纵向调整高度，保留浏览器原生 resize 能力。 */
 textarea { resize: vertical; }
 

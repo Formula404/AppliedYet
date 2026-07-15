@@ -52,11 +52,26 @@ const reminderOffsetValue = (dueAt?: string, remindAt?: string) => {
 function mockDetail(id: string, applications: ReturnType<typeof useInterviewFlow>["applications"]): ApplicationDetail | null {
   const app = applications.find((item) => item.id === id);
   if (!app) return null;
+  const now = new Date();
+  const at = (offset: number, hour = 10) => { const value = new Date(now); value.setDate(value.getDate() + offset); value.setHours(hour, 0, 0, 0); return value.toISOString(); };
   return {
-    id, companyName: app.company, positionTitle: app.role, location: app.city, priority: app.priority === "高" ? 3 : app.priority === "中" ? 2 : 1,
-    currentStage: app.stage, nextAction: app.nextStep, nextActionDueAt: undefined, appliedAt: "2026-07-13", channel: "招聘官网",
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), archivedAt: app.archived ? new Date().toISOString() : undefined, tasks: [],
-    events: [{ id: `mock-${id}`, eventType: "application_created", title: "创建投递", sourceType: "manual", happenedAt: new Date().toISOString(), reversible: false }],
+    id, companyName: app.company, companyShortName: app.company, industry: "互联网 / 软件服务", companyType: "大型科技企业",
+    website: "https://www.example.com", companyNotes: "重点关注技术成长、团队方向与工作地点；面试后及时补记问题和反馈。",
+    positionTitle: app.role, department: "核心业务技术部", location: app.city, recruitmentType: "校招", jobCode: `DEMO-${id.toUpperCase()}-2026`,
+    sourceUrl: "https://jobs.example.com/campus/demo", channel: "招聘官网", appliedAt: at(-12).slice(0, 10),
+    jdRaw: "岗位职责\n1. 参与核心业务服务的设计、开发与稳定性建设；\n2. 负责高并发场景下的性能优化与故障治理；\n3. 与产品、测试和上下游团队协作推进项目落地。\n\n任职要求\n熟悉 Java、数据库、缓存与消息队列；具备良好的工程意识和问题分析能力。",
+    priority: app.priority === "高" ? 3 : app.priority === "中" ? 2 : 1, currentStage: app.stage, nextAction: app.nextStep, nextActionDueAt: at(1, 14),
+    resumeProfileId: app.resumeProfileId, resumeName: app.resumeName, resumeFileFormat: "pdf", resumeTargetDirection: id === "jd" ? "数据开发 / 实时计算" : "Java 后端 / 平台研发",
+    createdAt: at(-12), updatedAt: at(0), archivedAt: app.archived ? at(0) : undefined,
+    tasks: [
+      { id: `task-${id}-1`, title: app.nextStep || "准备下一轮流程", description: "梳理岗位重点，并准备两个可量化的项目案例。", priority: 3, status: "doing", dueAt: at(1, 14), remindAt: at(1, 13), applicationStage: app.stage, sourceType: "manual", createdAt: at(-2) },
+      { id: `task-${id}-2`, title: "完成公司与业务调研", description: "整理业务模式、核心产品与近期技术动态。", priority: 2, status: "done", dueAt: at(-1, 20), applicationStage: app.stage, sourceType: "manual", completedAt: at(-1, 19), createdAt: at(-5) },
+    ],
+    events: [
+      { id: `event-${id}-stage`, eventType: "stage_changed", title: `流程更新为“${app.stage}”`, content: "由招聘邮件识别并经人工确认。", sourceType: "email", stageBefore: "已投递", stageAfter: app.stage, happenedAt: at(-2, 16), reversible: true },
+      { id: `event-${id}-note`, eventType: "manual_note", title: "完成岗位信息整理", content: "已补充 JD、岗位方向和面试准备重点。", sourceType: "manual", happenedAt: at(-5, 21), reversible: false },
+      { id: `mock-${id}`, eventType: "application_created", title: "创建投递", sourceType: "manual", happenedAt: at(-12, 11), reversible: false },
+    ],
   };
 }
 
@@ -92,7 +107,7 @@ export default function ApplicationDetailPage() {
   }, [applications, id]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { if (hasLocalDatabase) listResumeProfiles().then(setResumes).catch((reason) => setError(String(reason))); }, []);
+  useEffect(() => { listResumeProfiles().then(setResumes).catch((reason) => setError(String(reason))); }, []);
 
   const saveDetail = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

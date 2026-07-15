@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { StatusTone } from "../types";
+import { hasLocalDatabase } from "./applications";
+import { demoActivity, demoAnalytics, demoDashboard } from "../data/demo";
 
 export interface DashboardSummary {
   total: number;
@@ -67,9 +69,9 @@ export interface AnalyticsData {
   directions: Array<{ name: string; count: number }>;
 }
 
-export const getActivitySummary = () => invoke<ActivitySummary>("get_activity_summary");
-export const getAnalytics = () => invoke<AnalyticsData>("get_analytics");
+export const getActivitySummary = () => hasLocalDatabase ? invoke<ActivitySummary>("get_activity_summary") : Promise.resolve(demoActivity());
+export const getAnalytics = () => hasLocalDatabase ? invoke<AnalyticsData>("get_analytics") : Promise.resolve(demoAnalytics());
 
 export function getDashboard(monthStart: string, monthEnd: string, todayStart: string, todayEnd: string) {
-  return invoke<DashboardData>("get_dashboard", { monthStart, monthEnd, todayStart, todayEnd });
+  return hasLocalDatabase ? invoke<DashboardData>("get_dashboard", { monthStart, monthEnd, todayStart, todayEnd }) : Promise.resolve(demoDashboard());
 }

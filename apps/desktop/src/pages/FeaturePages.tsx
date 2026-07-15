@@ -35,9 +35,9 @@ const displayPercent = (value: number) => `${value.toFixed(1)}%`;
 
 function Analytics(){
   const [data,setData]=useState<AnalyticsData>(emptyAnalytics);
-  const [loading,setLoading]=useState(hasLocalDatabase);
+  const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
-  useEffect(()=>{if(!hasLocalDatabase)return;setLoading(true);getAnalytics().then(setData).catch((reason)=>setError(String(reason))).finally(()=>setLoading(false))},[]);
+  useEffect(()=>{setLoading(true);getAnalytics().then(setData).catch((reason)=>setError(String(reason))).finally(()=>setLoading(false))},[]);
   const monthDelta=data.thisMonth-data.previousMonth;
   const assessmentRate=percent(data.assessments,data.total), interviewRate=percent(data.interviews,data.total), offerRate=percent(data.offers,data.total);
   const stageRates:[[string,number,number],[string,number,number],[string,number,number]]=[["测评进入率",assessmentRate,assessmentRate],["面试进入率",percent(data.interviews,data.assessments),percent(data.interviews,data.assessments)],["Offer率",percent(data.offers,data.interviews),percent(data.offers,data.interviews)]];

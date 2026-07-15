@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const win = getCurrentWindow();
+const win = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+  ? getCurrentWindow()
+  : null;
 
 function MinusIcon() {
   return (
@@ -42,12 +44,14 @@ export default function TitleBar() {
   const [changingWindowState, setChangingWindowState] = useState(false);
 
   const syncMaximizedState = useCallback(async () => {
+    if (!win) return;
     setMaximized(await win.isMaximized());
   }, []);
 
   useEffect(() => {
     let disposed = false;
     const unlisten: (() => void)[] = [];
+    if (!win) return undefined;
     (async () => {
       const [initialMaximized, initialFocused, stopFocusListener, stopResizeListener] = await Promise.all([
         win.isMaximized(),
@@ -78,6 +82,7 @@ export default function TitleBar() {
   }, [syncMaximizedState]);
 
   const handleToggleMaximize = async () => {
+    if (!win) return;
     if (changingWindowState) return;
     setChangingWindowState(true);
     try {
@@ -92,6 +97,7 @@ export default function TitleBar() {
 
   const handleDragMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if (!win) return;
     if (event.detail === 2) {
       handleToggleMaximize();
       return;
@@ -106,13 +112,13 @@ export default function TitleBar() {
         <span className="titlebar-subtitle">Applied Yet?</span>
       </div>
       <div className="titlebar-controls">
-        <button type="button" className="tb-btn" onClick={() => void win.minimize()} aria-label="最小化" title="最小化">
+        <button type="button" className="tb-btn" onClick={() => void win?.minimize()} aria-label="最小化" title="最小化" disabled={!win}>
           <MinusIcon />
         </button>
         <button type="button" className="tb-btn" onClick={handleToggleMaximize} disabled={changingWindowState} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
           {maximized ? <RestoreIcon /> : <MaximizeIcon />}
         </button>
-        <button type="button" className="tb-btn tb-close" onClick={() => void win.close()} aria-label="关闭" title="关闭">
+        <button type="button" className="tb-btn tb-close" onClick={() => void win?.close()} aria-label="关闭" title="关闭" disabled={!win}>
           <CloseIcon />
         </button>
       </div>
