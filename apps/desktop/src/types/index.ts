@@ -63,6 +63,7 @@ export interface ApplicationEvent {
   stageBefore?: string;
   stageAfter?: string;
   happenedAt: string;
+  updatedAt?: string;
   reversible: boolean;
   revertedAt?: string;
 }

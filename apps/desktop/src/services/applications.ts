@@ -3,10 +3,20 @@ import type { Application, ApplicationDetail, ApplicationEvent, ApplicationTask 
 
 export interface CreateApplicationInput {
   companyName: string;
+  companyShortName?: string;
+  industry?: string;
+  companyType?: string;
+  website?: string;
+  companyNotes?: string;
   positionTitle: string;
+  department?: string;
   location?: string;
+  recruitmentType?: string;
+  jobCode?: string;
+  sourceUrl?: string;
   channel?: string;
   appliedAt?: string;
+  priority?: number;
   jdRaw?: string;
   resumeProfileId?: string;
 }
@@ -15,6 +25,10 @@ export const hasLocalDatabase = isTauri();
 
 export function listApplications() {
   return invoke<Application[]>("list_applications");
+}
+
+export function exportApplicationsExcel(path: string) {
+  return invoke<number>("export_applications_excel", { path });
 }
 
 export function createApplication(input: CreateApplicationInput) {
@@ -70,8 +84,16 @@ export function setApplicationArchived(id: string, archived: boolean) {
   return invoke<void>("set_application_archived", { id, archived });
 }
 
+export function deleteArchivedApplication(id: string) {
+  return invoke<void>("delete_archived_application", { id });
+}
+
 export function revertApplicationEvent(eventId: string) {
   return invoke<ApplicationDetail>("revert_application_event", { eventId });
+}
+
+export function updateApplicationEventTime(eventId: string, happenedAt: string) {
+  return invoke<ApplicationDetail>("update_application_event_time", { eventId, happenedAt });
 }
 
 export function createApplicationEvent(applicationId: string, input: CreateEventInput) {

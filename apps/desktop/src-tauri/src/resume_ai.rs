@@ -136,6 +136,7 @@ fn schema_transport_is_unsupported(error: &str) -> bool {
         || error.contains("json_schema")
         || error.contains("structured output")
         || error.contains("结构化输出不支持")
+        || error.contains("不支持结构化输出")
 }
 
 fn strip_json_fence(value: &str) -> &str {

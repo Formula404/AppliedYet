@@ -40,11 +40,24 @@ const pollDueTaskReminders = async () => {
   const reminders = await invoke<DueTaskReminder[]>("list_due_task_reminders", { now });
   if (schedulerUsers === 0) return;
   for (const reminder of reminders) {
-    sendNotification({
-      title: `任务提醒 · ${reminder.company}`,
-      body: `${reminder.title}\n${reminder.role} · 截止 ${dueText(reminder.dueAt)}`,
-    });
-    await invoke("mark_task_reminder_delivered", { taskId: reminder.taskId, notifiedAt: now });
+    try {
+      // Claim first so a failed database write cannot happen after the OS notification
+      // has already been shown. The conditional update also deduplicates other windows.
+      await invoke("mark_task_reminder_delivered", { taskId: reminder.taskId, notifiedAt: now });
+      try {
+        sendNotification({
+          title: `任务提醒 · ${reminder.company}`,
+          body: `${reminder.title}\n${reminder.role} · 截止 ${dueText(reminder.dueAt)}`,
+        });
+      } catch (error) {
+        await invoke("release_task_reminder_delivery", { taskId: reminder.taskId, notifiedAt: now })
+          .catch((releaseError) => console.error("任务通知发送失败且无法释放发送状态", releaseError));
+        throw error;
+      }
+    } catch (error) {
+      // One locked/deleted task must not prevent the rest of this due batch from firing.
+      console.error(`任务通知发送失败: ${reminder.taskId}`, error);
+    }
   }
 };
 

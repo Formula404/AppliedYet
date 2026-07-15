@@ -1,5 +1,5 @@
 const SERVICE_NAME: &str = "com.appliedyet.desktop";
-const ALLOWED_KEYS: &[&str] = &["ai_api_key", "asr_api_key"];
+const ALLOWED_KEYS: &[&str] = &["ai_api_key", "asr_api_key", "email_password", "email_oauth_refresh_token"];
 
 fn entry(key: &str) -> Result<keyring::Entry, String> {
     if !ALLOWED_KEYS.contains(&key) {

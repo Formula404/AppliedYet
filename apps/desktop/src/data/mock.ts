@@ -3,18 +3,22 @@ import type { Application, MailItem, TaskItemData } from "../types";
 export const columnStages: Record<string, string> = {
   "已投递": "已投递",
   "测评": "在线测评",
+  "笔试": "笔试",
   "面试": "面试中",
   "等待结果": "等待结果",
   "Offer": "已获Offer",
+  "进入人才库": "进入人才库",
   "已拒绝": "已拒绝",
 };
 
 export const stageToneMap: Record<string, string> = {
   "已投递": "blue",
   "在线测评": "orange",
+  "笔试": "orange",
   "面试中": "purple",
   "等待结果": "gray",
   "已获Offer": "teal",
+  "进入人才库": "gray",
   "已拒绝": "red",
 };
 

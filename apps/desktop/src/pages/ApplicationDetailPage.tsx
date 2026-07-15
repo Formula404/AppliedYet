@@ -9,17 +9,19 @@ import { useInterviewFlow } from "../hooks/useInterviewFlow";
 import {
   createApplicationEvent, createApplicationTask, deleteApplicationTask, getApplicationDetail, hasLocalDatabase,
   revertApplicationEvent, setApplicationTaskStatus, updateApplicationDetail, updateApplicationTask,
+  updateApplicationEventTime,
   type CreateEventInput, type CreateTaskInput, type UpdateApplicationDetailInput,
 } from "../services/applications";
 import type { ApplicationDetail, ApplicationEvent, ApplicationTask, StatusTone } from "../types";
 import { listResumeProfiles, type ResumeProfile } from "../services/resumes";
 
-const stages = ["准备投递", "已投递", "在线测评", "AI 面试", "HR 面试", "业务面试", "专业面试", "终面", "谈薪", "等待结果", "已获Offer", "已拒绝", "流程暂停", "流程结束"];
+const stages = ["准备投递", "已投递", "在线测评", "笔试", "AI 面试", "HR 面试", "业务面试", "专业面试", "终面", "谈薪", "等待结果", "已获Offer", "已拒绝", "进入人才库"];
 const optional = (value: FormDataEntryValue | null) => String(value || "").trim() || undefined;
+const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const dateText = (value?: string) => {
   if (!value) return "未设置";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short", timeZone: systemTimeZone });
 };
 const toUtc = (value?: string) => value ? new Date(value).toISOString() : undefined;
 const toLocalInput = (value?: string) => {
@@ -69,8 +71,10 @@ export default function ApplicationDetailPage() {
   const [addingTask, setAddingTask] = useState(false);
   const [addingEvent, setAddingEvent] = useState(false);
   const [editingTask, setEditingTask] = useState<ApplicationTask | null>(null);
+  const [editingEventTime, setEditingEventTime] = useState<ApplicationEvent | null>(null);
   const [saving, setSaving] = useState(false);
   const [taskError, setTaskError] = useState("");
+  const [eventError, setEventError] = useState("");
   const [resumes, setResumes] = useState<ResumeProfile[]>([]);
 
   const load = useCallback(async () => {
@@ -100,7 +104,8 @@ export default function ApplicationDetailPage() {
       positionTitle: String(data.get("positionTitle") || ""), department: optional(data.get("department")), location: optional(data.get("location")),
       recruitmentType: optional(data.get("recruitmentType")), jobCode: optional(data.get("jobCode")), sourceUrl: optional(data.get("sourceUrl")), jdRaw: optional(data.get("jdRaw")),
       appliedAt: optional(data.get("appliedAt")), channel: optional(data.get("channel")), priority: Number(data.get("priority")),
-      currentStage: String(data.get("currentStage") || "已投递"), nextAction: optional(data.get("nextAction")), nextActionDueAt: toUtc(optional(data.get("nextActionDueAt"))),
+      // 阶段和下一步行动由看板/流程区维护，编辑资料只修改岗位档案。
+      currentStage: detail.currentStage, nextAction: detail.nextAction, nextActionDueAt: detail.nextActionDueAt,
       resumeProfileId: optional(data.get("resumeProfileId")),
     };
     setSaving(true);
@@ -216,6 +221,7 @@ export default function ApplicationDetailPage() {
 
   const undoEvent = async (item: ApplicationEvent) => {
     if (!window.confirm(`撤销“${item.stageBefore} → ${item.stageAfter}”这次阶段变更吗？`)) return;
+    const scrollPosition = window.scrollY;
     try {
       if (hasLocalDatabase) {
         setDetail(await revertApplicationEvent(item.id));
@@ -223,6 +229,7 @@ export default function ApplicationDetailPage() {
       } else if (detail && item.stageBefore) {
         setDetail({ ...detail, currentStage: item.stageBefore, events: detail.events.map((event) => event.id === item.id ? { ...event, revertedAt: new Date().toISOString() } : event) });
       }
+      requestAnimationFrame(() => window.scrollTo({ top: scrollPosition, behavior: "instant" }));
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -242,6 +249,24 @@ export default function ApplicationDetailPage() {
       }
       setAddingEvent(false);
     } catch (reason) { setError(String(reason)); } finally { setSaving(false); }
+  };
+
+  const saveEventTime = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!detail || !editingEventTime) return;
+    const data = new FormData(event.currentTarget);
+    const happenedAt = toUtc(optional(data.get("happenedAt")));
+    if (!happenedAt) { setEventError("请选择状态实际发生时间"); return; }
+    setSaving(true);
+    setEventError("");
+    try {
+      if (hasLocalDatabase) {
+        setDetail(await updateApplicationEventTime(editingEventTime.id, happenedAt));
+      } else {
+        setDetail({ ...detail, events: detail.events.map((item) => item.id === editingEventTime.id ? { ...item, happenedAt, updatedAt: new Date().toISOString() } : item) });
+      }
+      setEditingEventTime(null);
+    } catch (reason) { setEventError(String(reason)); } finally { setSaving(false); }
   };
 
   if (loading) return <div className="page page-enter"><div className="detail-loading">正在读取岗位详情…</div></div>;
@@ -280,8 +305,8 @@ export default function ApplicationDetailPage() {
         </Card>
 
         <Card className="detail-section-card">
-          <div className="section-heading"><div><History size={18} /><span><h2>事件时间线</h2><small>{detail.events.length} 条可追溯记录</small></span></div><button className="button button--secondary" onClick={() => setAddingEvent(true)}><Plus size={14} />补记事件</button></div>
-          <div className="event-timeline">{detail.events.length ? detail.events.map((item) => <div className={`event-item ${item.revertedAt ? "is-reverted" : ""}`} key={item.id}><span className={`event-dot event-dot--${item.sourceType}`} /><div><div className="event-title"><strong>{item.title}</strong><Badge tone="gray">{item.revertedAt ? "已撤销" : sourceText[item.sourceType] || item.sourceType}</Badge><time>{dateText(item.happenedAt)}</time>{item.reversible && !item.revertedAt && <button className="event-undo" onClick={() => undoEvent(item)}><RotateCcw size={12} />撤销</button>}</div>{item.content && <p>{item.content}</p>}{item.stageBefore && item.stageAfter && <div className="stage-change"><span>{item.stageBefore}</span><b>→</b><span>{item.stageAfter}</span></div>}</div></div>) : <div className="detail-empty">暂无事件记录</div>}</div>
+          <div className="section-heading"><div><History size={18} /><span><h2>事件时间线</h2><small>{detail.events.filter((item) => !item.revertedAt && item.eventType !== "event_reverted").length} 条有效记录</small></span></div><button type="button" className="button button--secondary" onClick={() => setAddingEvent(true)}><Plus size={14} />补记事件</button></div>
+          <div className="event-timeline">{detail.events.some((item) => !item.revertedAt && item.eventType !== "event_reverted") ? detail.events.filter((item) => !item.revertedAt && item.eventType !== "event_reverted").map((item) => <div className="event-item" key={item.id}><span className={`event-dot event-dot--${item.sourceType}`} /><div><div className="event-title"><strong>{item.title}</strong><Badge tone="gray">{sourceText[item.sourceType] || item.sourceType}</Badge><time>{dateText(item.happenedAt)}</time>{item.eventType === "stage_changed" && <button type="button" className="event-time-edit" onClick={() => { setEventError(""); setEditingEventTime(item); }} aria-label="修改状态发生时间"><Pencil size={12} />时间</button>}{item.reversible && <button type="button" className="event-undo" onClick={() => undoEvent(item)}><RotateCcw size={12} />撤销</button>}</div>{item.content && <p>{item.content}</p>}{item.stageBefore && item.stageAfter && <div className="stage-change"><span>{item.stageBefore}</span><b>→</b><span>{item.stageAfter}</span></div>}</div></div>) : <div className="detail-empty">暂无事件记录</div>}</div>
         </Card>
       </div>
 
@@ -303,8 +328,7 @@ export default function ApplicationDetailPage() {
       <label><span>岗位编号</span><input name="jobCode" defaultValue={detail.jobCode} /></label><label><span>投递渠道</span><input name="channel" defaultValue={detail.channel} /></label>
       <label><span>投递日期</span><input name="appliedAt" type="date" defaultValue={detail.appliedAt?.slice(0, 10)} /></label><label><span>优先级</span><select name="priority" defaultValue={detail.priority}><option value="3">高</option><option value="2">中</option><option value="1">普通</option></select></label>
       <label className="full"><span>关联简历</span><select name="resumeProfileId" defaultValue={detail.resumeProfileId || ""}><option value="">暂不关联</option>{detail.resumeProfileId && !resumes.some((item) => item.id === detail.resumeProfileId) && <option value={detail.resumeProfileId}>{detail.resumeName || "历史简历"}（历史引用）</option>}{resumes.filter((item) => !item.archivedAt || item.id === detail.resumeProfileId).map((resume) => <option key={resume.id} value={resume.id}>{resume.name}{resume.targetDirection ? ` · ${resume.targetDirection}` : ""}{resume.isPrimary ? "（默认）" : ""}</option>)}</select></label>
-      <label><span>当前阶段</span><select name="currentStage" defaultValue={detail.currentStage}>{!stages.includes(detail.currentStage) && <option>{detail.currentStage}</option>}{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></label><label><span>下一步行动</span><input name="nextAction" defaultValue={detail.nextAction} /></label>
-      <label><span>下一步时间</span><input name="nextActionDueAt" type="datetime-local" defaultValue={toLocalInput(detail.nextActionDueAt)} /></label><label><span>公司官网</span><input name="website" type="url" defaultValue={detail.website} /></label>
+      <label><span>公司官网</span><input name="website" type="url" defaultValue={detail.website} /></label>
       <label className="full"><span>招聘链接</span><input name="sourceUrl" type="url" defaultValue={detail.sourceUrl} /></label><label className="full"><span>JD 原文</span><textarea name="jdRaw" rows={7} defaultValue={detail.jdRaw} /></label><label className="full"><span>公司备注</span><textarea name="companyNotes" rows={3} defaultValue={detail.companyNotes} /></label>
     </div><ModalActions saving={saving} onCancel={() => setEditing(false)} /></form></Modal>}
 
@@ -313,11 +337,12 @@ export default function ApplicationDetailPage() {
     {editingTask && <Modal title="编辑任务" description="修改任务后会自动记录到事件时间线" onClose={() => setEditingTask(null)}>{taskError && <div className="form-inline-error">{taskError}</div>}<form onSubmit={saveTaskEdit}><div className="form-grid"><label className="full"><span>任务标题 *</span><input name="title" required autoFocus defaultValue={editingTask.title} /></label><label className="full"><span>描述</span><textarea name="description" rows={3} defaultValue={editingTask.description} /></label><label><span>截止时间</span><input name="dueAt" type="datetime-local" defaultValue={toLocalInput(editingTask.dueAt)} /></label><label><span>提醒时间</span><select name="reminderOffset" defaultValue={reminderOffsetValue(editingTask.dueAt, editingTask.remindAt)}><option value="">不提醒</option>{reminderOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><label><span>优先级</span><select name="priority" defaultValue={editingTask.priority}><option value="3">高</option><option value="2">中</option><option value="1">普通</option></select></label><label><span>关联阶段</span><select name="applicationStage" defaultValue={editingTask.applicationStage || ""}><option value="">不限定</option>{editingTask.applicationStage && !stages.includes(editingTask.applicationStage) && <option>{editingTask.applicationStage}</option>}{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></label></div><ModalActions saving={saving} onCancel={() => setEditingTask(null)} /></form></Modal>}
 
     {addingEvent && <Modal title="补记事件" description="手动补充沟通、面试、备注等流程记录" onClose={() => setAddingEvent(false)}><form onSubmit={addEvent}><div className="form-grid"><label className="full"><span>事件标题 *</span><input name="title" required autoFocus placeholder="例如：HR 电话沟通" /></label><label className="full"><span>详细内容</span><textarea name="content" rows={4} /></label><label className="full"><span>发生时间</span><input name="happenedAt" type="datetime-local" defaultValue={toLocalInput(new Date().toISOString())} /></label></div><ModalActions saving={saving} onCancel={() => setAddingEvent(false)} /></form></Modal>}
+    {editingEventTime && <Modal title="修改状态发生时间" description="仅修正实际发生时间；系统创建时间会保留用于审计" onClose={() => setEditingEventTime(null)}>{eventError && <div className="form-inline-error">{eventError}</div>}<form onSubmit={saveEventTime}><div className="form-grid"><label className="full"><span>状态变更</span><input value={`${editingEventTime.stageBefore || "未知"} → ${editingEventTime.stageAfter || "未知"}`} disabled /></label><label className="full"><span>实际发生时间 *</span><input name="happenedAt" type="datetime-local" required autoFocus defaultValue={toLocalInput(editingEventTime.happenedAt)} /></label><p className="event-time-help">为保证流程顺序一致，时间不能早于上一状态节点，也不能晚于下一状态节点。</p></div><ModalActions saving={saving} onCancel={() => setEditingEventTime(null)} /></form></Modal>}
   </div>;
 }
 
 function Modal({ title, description, onClose, children }: { title: string; description: string; onClose: () => void; children: React.ReactNode }) {
-  return <div className="modal-backdrop"><div className="dialog application-detail-dialog"><div className="dialog-head"><div><h2>{title}</h2><p>{description}</p></div><button onClick={onClose}><X size={19} /></button></div>{children}</div></div>;
+  return <div className="modal-backdrop application-detail-backdrop"><div className="dialog application-detail-dialog"><div className="dialog-head"><div><h2>{title}</h2><p>{description}</p></div><button type="button" onClick={onClose}><X size={19} /></button></div>{children}</div></div>;
 }
 
 function ModalActions({ saving, onCancel }: { saving: boolean; onCancel: () => void }) {

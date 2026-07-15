@@ -1145,15 +1145,42 @@ textarea { resize: vertical; }
 }
 
 .event {
+  position: relative;
   font-style: normal;
   font-size: 10px;
-  padding: 3px 5px;
+  padding: 3px 5px 3px 17px;
   border-radius: 4px;
   display: block;
   margin-top: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis
+}
+
+.event::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  transform: translateY(-50%);
+  background: currentColor
+}
+
+.event--type-task::before { border-radius: 2px }
+.event--type-milestone {
+  background: color-mix(in srgb, currentColor 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent)
+}
+.event--type-milestone::before { transform: translateY(-50%) rotate(45deg); border-radius: 1px }
+.event--type-next_action::before { border-radius: 50%; background: transparent; border: 1.5px solid currentColor; box-sizing: border-box }
+
+.calendar-more {
+  display: block;
+  margin: 3px 0 0 5px;
+  color: var(--text-placeholder);
+  font-size: 9px
 }
 
 .event--green {
@@ -1351,14 +1378,21 @@ textarea { resize: vertical; }
 .funnel button>span,
 .funnel>div>span {
   height: 28px;
-  padding: 0 10px;
+  box-sizing: border-box;
+  padding: 0 28px 0 12px;
   background: var(--blue-soft);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  clip-path: polygon(3% 0, 97% 0, 92% 100%, 8% 100%);
-  font-size: 10px
+  clip-path: polygon(0 0, 100% 0, 94% 100%, 0 100%);
+  font-size: 10px;
+  min-width: 0;
+  gap: 6px
 }
+
+.funnel-label { min-width: 0; white-space: nowrap }
+.funnel button>span>b,
+.funnel>div>span>b { flex: 0 0 auto }
 
 .funnel button:nth-child(2)>span,
 .funnel>div:nth-child(2)>span {
@@ -1432,6 +1466,66 @@ textarea { resize: vertical; }
   place-items: center;
   padding: 0;
   cursor: pointer
+}
+
+.calendar-type-legend { gap: 18px }
+.calendar-type-mark {
+  width: 7px;
+  height: 7px;
+  display: inline-block;
+  background: var(--primary)
+}
+.calendar-type-mark--task { border-radius: 2px }
+.calendar-type-mark--milestone { transform: rotate(45deg); background: var(--purple) }
+.calendar-type-mark--next { border-radius: 50%; background: transparent; border: 1.5px solid var(--muted); box-sizing: border-box }
+
+.calendar-event-type-icon {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px !important;
+  display: grid !important;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--primary);
+  background: var(--blue-soft)
+}
+
+.selected-day-event--milestone .calendar-event-type-icon {
+  color: var(--purple);
+  background: var(--purple-soft);
+  border-radius: 50%
+}
+
+.notification-anchor { position: relative }
+.notification-anchor>.icon-button.active { background: var(--soft); color: var(--primary) }
+.notification-panel {
+  position: absolute; top: calc(100% + 10px); right: -8px; width: min(390px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .18); overflow: hidden; z-index: 30
+}
+.notification-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border-light) }
+.notification-head>span { display: flex; flex-direction: column; gap: 3px }
+.notification-head strong { font-size: 13px }
+.notification-head small { color: var(--muted); font-size: 10px }
+.notification-head>button { border: 0; background: transparent; color: var(--primary); font-size: 11px }
+.notification-list { max-height: 360px; overflow: auto; padding: 6px }
+.notification-section-title { padding: 8px 10px 4px; color: var(--text-placeholder); font-size: 9px; font-weight: 600 }
+.notification-list>button { width: 100%; border: 0; background: transparent; border-radius: 8px; padding: 10px; display: grid; grid-template-columns: 24px minmax(0,1fr) auto; gap: 8px; align-items: center; text-align: left }
+.notification-list>button:hover { background: var(--soft) }
+.notification-list>button.done { opacity: .58 }
+.notification-list>button>span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 3px }
+.notification-list>button strong,.notification-list>button small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.notification-list>button strong { font-size: 11px }
+.notification-list>button small,.notification-list time { color: var(--muted); font-size: 9px }
+.notification-list>p { min-height: 90px; margin: 0; color: var(--muted); display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 11px }
+.notification-mark { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; color: var(--primary); background: var(--blue-soft) }
+.notification-mark.overdue { color: var(--red); background: var(--red-soft) }
+.notification-mark--email { color: var(--orange); background: var(--orange-soft) }
+.notification-mark--email.unmatched { color: var(--muted); background: var(--soft) }
+
+.selected-day-event--next_action .calendar-event-type-icon {
+  color: var(--muted);
+  background: var(--soft)
 }
 
 .task-check:hover {
@@ -1612,12 +1706,7 @@ textarea { resize: vertical; }
 .rate-row>div {
   display: flex;
   align-items: center;
-  gap: 8px;
-  border-right: 1px solid var(--border)
-}
-
-.rate-row>div:last-child {
-  border: 0
+  gap: 8px
 }
 
 .ring {
@@ -1722,6 +1811,38 @@ textarea { resize: vertical; }
   align-items: center
 }
 
+.filter-select {
+  height: 34px;
+  min-width: 126px;
+  background: var(--surface);
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  padding: 0 8px 0 10px;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  color: var(--muted)
+}
+
+.filter-select select {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer
+}
+
+.filter-clear {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 11px;
+  white-space: nowrap
+}
+
 .toolbar-spacer {
   flex: 1
 }
@@ -1753,7 +1874,7 @@ textarea { resize: vertical; }
 
 .kanban {
   display: grid;
-  grid-template-columns: repeat(5, minmax(205px, 1fr));
+  grid-template-columns: repeat(7, minmax(205px, 1fr));
   gap: 12px;
   overflow-x: auto;
   padding-bottom: 8px
@@ -1911,11 +2032,25 @@ textarea { resize: vertical; }
   border-top: 1px solid var(--border-light);
   margin-top: 10px;
   padding-top: 9px;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
   font-size: 9px;
   color: var(--text-placeholder)
 }
+
+.application-foot>span {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+.application-foot time,
+.application-foot button { white-space: nowrap }
+.application-foot .application-detail-link { margin-left: 0 }
 
 .rejected-section {
   margin-top: 14px;
@@ -2054,6 +2189,18 @@ textarea { resize: vertical; }
   gap: 10px
 }
 
+.table-card .company-logo {
+  align-self: center;
+  box-sizing: border-box;
+  padding-top: 1px;
+  line-height: 1
+}
+
+.table-card .application-table-empty td {
+  display: table-cell;
+  text-align: center
+}
+
 .table-card td>span:not(.badge) {
   display: flex;
   flex-direction: column
@@ -2097,7 +2244,71 @@ textarea { resize: vertical; }
 }
 
 .application-dialog {
-  margin-top: -7vh
+  margin-top: -3vh;
+  max-height: calc(100vh - 54px);
+  overflow: auto
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px
+}
+
+.status-modal-backdrop { z-index: 1200 }
+
+.status-dialog {
+  position: relative;
+  width: min(420px, calc(100vw - 40px));
+  padding: 26px;
+  text-align: center;
+  overflow: visible
+}
+
+.status-dialog-close {
+  position: absolute;
+  right: 13px;
+  top: 13px;
+  border: 0;
+  background: transparent;
+  color: var(--muted)
+}
+
+.status-dialog-icon {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 13px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--green-soft);
+  color: var(--green)
+}
+
+.status-dialog--error .status-dialog-icon {
+  background: var(--red-soft);
+  color: var(--red)
+}
+
+.status-dialog-icon--danger {
+  background: var(--red-soft);
+  color: var(--red)
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px
+}
+
+.status-dialog h2 { margin: 0 0 9px; font-size: 18px }
+.status-dialog p {
+  margin: 0 0 20px;
+  color: var(--muted);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.7
 }
 
 .dialog-head {
@@ -2383,6 +2594,21 @@ textarea { resize: vertical; }
 .email-detail {
   padding: 0 22px 18px
 }
+
+.email-empty {
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-placeholder);
+  text-align: center;
+  padding: 24px
+}
+
+.email-empty strong { color: var(--text-secondary); font-size: 12px }
+.email-empty small { font-size: 10px }
 
 .detail-head {
   padding: 20px 0 15px;
@@ -3722,6 +3948,9 @@ textarea { resize: vertical; }
   font-size: 10px
 }
 
+.distribution>div>span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.distribution .analytics-empty { display: flex; justify-content: center; width: 100%; color: var(--muted) }
+
 .distribution>div>i {
   height: 8px;
   background: var(--border-light);
@@ -3867,6 +4096,60 @@ textarea { resize: vertical; }
 .danger-zone .card-header h2 {
   color: var(--red)
 }
+
+.mail-body-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere
+}
+
+.mail-body:not(.is-expanded) .mail-body-content {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden
+}
+
+.mail-body-content a {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 2px
+}
+
+.mail-expand-button {
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  padding: 3px 0
+}
+
+.mail-link-list {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  gap: 7px
+}
+
+.mail-link-list>strong { font-size: 11px; color: var(--text) }
+.mail-link-list a {
+  display: grid;
+  grid-template-columns: 15px minmax(100px, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+  color: var(--primary);
+  text-decoration: none;
+  font-size: 10px
+}
+.mail-link-list a small { color: var(--text-placeholder); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 
 .resume-page {
   display: flex;
@@ -4293,6 +4576,9 @@ textarea { resize: vertical; }
 .keyword-chip {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1;
   gap: 5px;
   padding: 6px 8px;
   border-radius: 999px;
@@ -5573,6 +5859,8 @@ textarea { resize: vertical; }
 .event-title strong { font-size: 11px; }
 .event-title time { margin-left: auto; color: var(--text-placeholder); font-size: 9px; }
 .event-undo { display: flex; align-items: center; gap: 3px; border: 0; background: transparent; color: var(--primary); font-size: 9px; padding: 3px 5px; }
+.event-time-edit { display: flex; align-items: center; gap: 3px; border: 0; background: transparent; color: var(--muted); font-size: 9px; padding: 3px 5px; }
+.event-time-help { grid-column: 1 / -1; margin: -2px 0 0; color: var(--text-placeholder); font-size: 10px; line-height: 1.55; }
 .event-item.is-reverted { opacity: .5; }
 .event-item.is-reverted .stage-change span { text-decoration: line-through; }
 .event-item p { margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
@@ -5582,8 +5870,60 @@ textarea { resize: vertical; }
 
 .application-detail-dialog {
   width: min(820px, calc(100vw - 48px));
-  max-height: calc(100vh - 60px);
-  overflow: auto;
+  height: auto;
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.application-detail-backdrop {
+  align-items: center;
+  padding: 16px 24px;
+  box-sizing: border-box;
+  overflow: hidden
+}
+
+.application-detail-dialog>.dialog-head {
+  flex: 0 0 auto
+}
+
+.application-detail-dialog>form {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden
+}
+
+.application-detail-dialog>form>.form-grid {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px 20px;
+  scrollbar-gutter: stable
+}
+
+.application-detail-dialog>form>.dialog-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 -8px 18px rgba(16, 24, 40, .04)
+}
+
+.application-detail-dialog>.form-inline-error {
+  flex: 0 0 auto
+}
+
+@media (max-height: 640px) {
+  .application-detail-backdrop { padding-block: 8px }
+  .application-detail-dialog { max-height: calc(100vh - 16px) }
+  .application-detail-dialog>form>.form-grid { padding-block: 12px }
+  .application-detail-dialog>form>.dialog-actions { padding-block: 10px }
 }
 
 .form-inline-error {

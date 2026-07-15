@@ -30,4 +30,39 @@ pub(super) const MIGRATIONS: &[(i64, &str, &str)] = &[
         "007_resume_workflow",
         include_str!("../../migrations/007_resume_workflow.sql"),
     ),
+    (
+        8,
+        "008_application_event_times",
+        include_str!("../../migrations/008_application_event_times.sql"),
+    ),
+    (
+        9,
+        "009_application_event_recorded_at",
+        include_str!("../../migrations/009_application_event_recorded_at.sql"),
+    ),
+    (
+        10,
+        "010_app_settings",
+        include_str!("../../migrations/010_app_settings.sql"),
+    ),
+    (
+        11,
+        "011_email_pipeline",
+        include_str!("../../migrations/011_email_pipeline.sql"),
+    ),
+    (
+        12,
+        "012_email_sync_state_repair",
+        include_str!("../../migrations/012_email_sync_state_repair.sql"),
+    ),
+    (
+        13,
+        "013_email_links",
+        include_str!("../../migrations/013_email_links.sql"),
+    ),
+    (
+        14,
+        "014_application_stages",
+        include_str!("../../migrations/014_application_stages.sql"),
+    ),
 ];

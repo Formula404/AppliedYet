@@ -26,10 +26,10 @@ impl Default for AiProviderSettings {
             fallback_model: None,
             max_output_tokens: 4096,
             timeout_seconds: 60,
-            allow_resume: false,
-            allow_email: false,
-            allow_transcript: false,
-            prompt_before_send: true,
+            allow_resume: true,
+            allow_email: true,
+            allow_transcript: true,
+            prompt_before_send: false,
         }
     }
 }
@@ -69,4 +69,39 @@ impl Default for AsrProviderSettings {
 pub struct ProviderSettings {
     pub ai: AiProviderSettings,
     pub asr: AsrProviderSettings,
+    pub email: EmailSettings,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EmailSettings {
+    pub provider: String,
+    pub email_address: String,
+    pub imap_host: String,
+    pub imap_port: i64,
+    pub username: String,
+    pub use_tls: bool,
+    pub polling_minutes: i64,
+    pub enabled: bool,
+    pub auth_method: String,
+    pub oauth_client_id: String,
+    pub oauth_tenant: String,
+}
+
+impl Default for EmailSettings {
+    fn default() -> Self {
+        Self {
+            provider: "自定义 IMAP".into(),
+            email_address: String::new(),
+            imap_host: String::new(),
+            imap_port: 993,
+            username: String::new(),
+            use_tls: true,
+            polling_minutes: 10,
+            enabled: false,
+            auth_method: "password".into(),
+            oauth_client_id: String::new(),
+            oauth_tenant: "common".into(),
+        }
+    }
 }

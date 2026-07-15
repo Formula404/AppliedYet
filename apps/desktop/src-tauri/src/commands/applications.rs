@@ -1,7 +1,7 @@
 use crate::db::{
     ApplicationDetail, ApplicationEvent, ApplicationListItem, ApplicationTask,
     CreateApplicationInput, CreateEventInput, CreateTaskInput, DashboardData, Database,
-    DueTaskReminder, UpdateApplicationDetailInput, UpdateTaskInput,
+    AnalyticsData, DueTaskReminder, UpdateApplicationDetailInput, UpdateTaskInput,
 };
 
 #[tauri::command]
@@ -9,6 +9,24 @@ pub(crate) fn list_applications(
     db: tauri::State<'_, Database>,
 ) -> Result<Vec<ApplicationListItem>, String> {
     db.list_applications()
+}
+
+#[tauri::command]
+pub(crate) fn get_activity_summary(
+    db: tauri::State<'_, Database>,
+) -> Result<crate::db::ActivitySummary, String> {
+    db.get_activity_summary()
+}
+#[tauri::command]
+pub(crate) fn get_analytics(db: tauri::State<'_, Database>) -> Result<AnalyticsData, String> {
+    db.get_analytics()
+}
+#[tauri::command]
+pub(crate) fn export_applications_excel(
+    db: tauri::State<'_, Database>,
+    path: String,
+) -> Result<usize, String> {
+    db.export_applications_excel(&path)
 }
 #[tauri::command]
 pub(crate) fn create_application(
@@ -87,12 +105,27 @@ pub(crate) fn revert_application_event(
     db.revert_application_event(&event_id)
 }
 #[tauri::command]
+pub(crate) fn update_application_event_time(
+    db: tauri::State<'_, Database>,
+    event_id: String,
+    happened_at: String,
+) -> Result<ApplicationDetail, String> {
+    db.update_application_event_time(&event_id, &happened_at)
+}
+#[tauri::command]
 pub(crate) fn set_application_archived(
     db: tauri::State<'_, Database>,
     id: String,
     archived: bool,
 ) -> Result<(), String> {
     db.set_application_archived(&id, archived)
+}
+#[tauri::command]
+pub(crate) fn delete_archived_application(
+    db: tauri::State<'_, Database>,
+    id: String,
+) -> Result<(), String> {
+    db.delete_archived_application(&id)
 }
 #[tauri::command]
 pub(crate) fn get_dashboard(
@@ -118,4 +151,12 @@ pub(crate) fn mark_task_reminder_delivered(
     notified_at: String,
 ) -> Result<(), String> {
     db.mark_task_reminder_delivered(&task_id, &notified_at)
+}
+#[tauri::command]
+pub(crate) fn release_task_reminder_delivery(
+    db: tauri::State<'_, Database>,
+    task_id: String,
+    notified_at: String,
+) -> Result<(), String> {
+    db.release_task_reminder_delivery(&task_id, &notified_at)
 }

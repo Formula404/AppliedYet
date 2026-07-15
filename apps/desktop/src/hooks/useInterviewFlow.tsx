@@ -1,8 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { applications as initialApplications } from "../data/mock";
 import type { Application } from "../types";
 import {
   createApplication as persistApplication,
+  deleteArchivedApplication as persistArchivedApplicationDeletion,
   hasLocalDatabase,
   listApplications,
   setApplicationArchived as persistApplicationArchived,
@@ -58,10 +59,11 @@ interface InterviewFlowValue {
   applicationsLoading: boolean;
   applicationsError: string | null;
   setSelectedApplicationId: (id: string) => void;
-  updateApplicationStage: (id: string, stage: string, stageTone: Application["stageTone"]) => void;
+  updateApplicationStage: (id: string, stage: string, stageTone: Application["stageTone"]) => Promise<void>;
   createApplication: (input: CreateApplicationInput) => Promise<Application>;
   refreshApplications: () => Promise<void>;
   archiveApplication: (id: string, archived: boolean) => Promise<void>;
+  deleteApplication: (id: string) => Promise<void>;
   importExperienceLink: (applicationId: string, url: string) => string;
   addManualExperience: (applicationId: string, title: string, questions: string[]) => string;
   analyzeExperienceLink: (id: string) => void;
@@ -72,7 +74,7 @@ interface InterviewFlowValue {
 
 const InterviewFlowContext = createContext<InterviewFlowValue | null>(null);
 const isInterviewEligible = (application: Application) =>
-  !application.archived && !application.stage.includes("拒绝") && !application.stage.toLowerCase().includes("offer");
+  !application.archived && !application.stage.includes("拒绝") && !application.stage.includes("人才库") && !application.stage.toLowerCase().includes("offer");
 const makeId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 const experienceQuestions = [
@@ -100,6 +102,7 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
   const [applications, setApplications] = useState<Application[]>(() => hasLocalDatabase ? [] : initialApplications.map((item) => ({ ...item })));
   const [applicationsLoading, setApplicationsLoading] = useState(hasLocalDatabase);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
+  const stageUpdateQueues = useRef(new Map<string, Promise<void>>());
   const [selectedApplicationId, setSelectedApplicationId] = useState("ant");
   const [experienceLinks, setExperienceLinks] = useState<ExperienceLink[]>([
     { id: "link-ant-1", applicationId: "ant", source: "link", url: "https://www.nowcoder.com/discuss/ant-backend", title: "蚂蚁后端一面经验整理", importedAt: "今天 10:24", status: "已提取", questions: experienceQuestions },
@@ -130,7 +133,8 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     try {
       const items = await listApplications();
       setApplications(items);
-      setSelectedApplicationId((current) => items.some((item) => item.id === current) ? current : (items[0]?.id || ""));
+      const eligible = items.filter(isInterviewEligible);
+      setSelectedApplicationId((current) => eligible.some((item) => item.id === current) ? current : (eligible[0]?.id || ""));
       setApplicationsError(null);
     } catch (error) {
       setApplicationsError(String(error));
@@ -157,6 +161,10 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     applicationsError,
     refreshApplications,
     archiveApplication: async (id, archived) => {
+      if (archived && selectedApplicationId === id) {
+        const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
+        setSelectedApplicationId(next?.id ?? "");
+      }
       if (hasLocalDatabase) {
         await persistApplicationArchived(id, archived);
         await refreshApplications();
@@ -164,15 +172,44 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         setApplications((current) => current.map((item) => item.id === id ? { ...item, archived } : item));
       }
     },
+    deleteApplication: async (id) => {
+      if (hasLocalDatabase) {
+        await persistArchivedApplicationDeletion(id);
+        await refreshApplications();
+      } else {
+        const target = applications.find((item) => item.id === id);
+        if (!target) throw new Error("投递记录不存在");
+        if (!target.archived) throw new Error("只能删除已归档的投递");
+        setApplications((current) => current.filter((item) => item.id !== id));
+      }
+    },
     setSelectedApplicationId,
-    updateApplicationStage: (id, stage, stageTone) => {
-      const previous = applications.find((item) => item.id === id);
+    updateApplicationStage: async (id, stage, stageTone) => {
+      const previousApplication = applications.find((item) => item.id === id);
       setApplications((current) => current.map((item) => item.id === id ? { ...item, stage, stageTone, updated: "刚刚" } : item));
       if (hasLocalDatabase) {
-        persistApplicationStage(id, stage).catch((error) => {
-          if (previous) setApplications((current) => current.map((item) => item.id === id ? previous : item));
+        // 同一投递的连续拖拽必须按用户操作顺序落库，否则后发请求可能先完成，
+        // 造成 current_stage 与事件时间线脱节，继而无法正确撤销。
+        const previousQueue = stageUpdateQueues.current.get(id) ?? Promise.resolve();
+        const queuedUpdate = previousQueue.catch(() => undefined).then(() => persistApplicationStage(id, stage));
+        stageUpdateQueues.current.set(id, queuedUpdate);
+        try {
+          await queuedUpdate;
+          setApplicationsError(null);
+        } catch (error) {
           setApplicationsError(String(error));
-        });
+          if (previousApplication) {
+            const rollback = previousApplication;
+            setApplications((current) => current.map((item) =>
+              item.id === id && item.stage === stage ? rollback : item));
+          }
+          // Do not refresh here: a later drag for the same card may already be queued and
+          // persisting. Its optimistic state (and eventual database value) must not be
+          // overwritten by a snapshot taken while that queued write is still in flight.
+          throw error;
+        } finally {
+          if (stageUpdateQueues.current.get(id) === queuedUpdate) stageUpdateQueues.current.delete(id);
+        }
       }
       if ((stage.includes("拒绝") || stage.toLowerCase().includes("offer")) && selectedApplicationId === id) {
         const next = applications.find((item) => item.id !== id && isInterviewEligible(item));

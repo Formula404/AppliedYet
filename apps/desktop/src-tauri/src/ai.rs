@@ -308,6 +308,8 @@ fn schema_transport_is_unsupported(error: &str) -> bool {
     error.contains("response_format")
         || error.contains("json_schema")
         || error.contains("structured output")
+        || error.contains("结构化输出不支持")
+        || error.contains("不支持结构化输出")
 }
 
 fn strip_json_fence(value: &str) -> &str {
@@ -551,5 +553,11 @@ mod tests {
         let schema = interview_schema();
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["properties"]["predictedQuestions"].is_object());
+    }
+
+    #[test]
+    fn chinese_schema_errors_enable_transport_fallback() {
+        assert!(schema_transport_is_unsupported("当前服务不支持结构化输出"));
+        assert!(schema_transport_is_unsupported("结构化输出不支持此模型"));
     }
 }

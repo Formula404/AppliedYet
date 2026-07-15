@@ -1,29 +1,56 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path, sync::Mutex};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use uuid::Uuid;
 
 mod migrations;
+mod email;
 pub mod models;
+pub use email::{EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult};
 use migrations::MIGRATIONS;
 pub use models::{
     AiApplicationContext, AiCallSummary, AiProviderSettings, AsrProviderSettings,
-    CreateResumeProfileInput, ProcessingJobResult, ProviderSettings, ResumeAiContext,
-    ResumeProfile, StoredInterviewPreparation, UpdateResumeProfileInput,
+    CreateResumeProfileInput, EmailSettings, ProcessingJobResult, ProviderSettings,
+    ResumeAiContext, ResumeProfile, StoredInterviewPreparation, UpdateResumeProfileInput,
 };
 
 pub struct Database {
     connection: Mutex<Connection>,
+    path: Mutex<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateApplicationInput {
     pub company_name: String,
+    #[serde(default)]
+    pub company_short_name: Option<String>,
+    #[serde(default)]
+    pub industry: Option<String>,
+    #[serde(default)]
+    pub company_type: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub company_notes: Option<String>,
     pub position_title: String,
+    #[serde(default)]
+    pub department: Option<String>,
     pub location: Option<String>,
+    #[serde(default)]
+    pub recruitment_type: Option<String>,
+    #[serde(default)]
+    pub job_code: Option<String>,
+    #[serde(default)]
+    pub source_url: Option<String>,
     pub channel: Option<String>,
     pub applied_at: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
     pub jd_raw: Option<String>,
     pub resume_profile_id: Option<String>,
 }
@@ -188,6 +215,7 @@ pub struct ApplicationEvent {
     pub stage_before: Option<String>,
     pub stage_after: Option<String>,
     pub happened_at: String,
+    pub updated_at: String,
     pub reversible: bool,
     pub reverted_at: Option<String>,
 }
@@ -248,6 +276,45 @@ pub struct DashboardEvent {
     pub tone: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivitySummary {
+    pub streak_days: i64,
+    pub this_week_applications: i64,
+    pub previous_week_applications: i64,
+    pub daily_activity: Vec<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsData {
+    pub total: i64,
+    pub this_month: i64,
+    pub previous_month: i64,
+    pub assessments: i64,
+    pub interviews: i64,
+    pub offers: i64,
+    pub average_feedback_days: Option<f64>,
+    pub daily: Vec<AnalyticsPeriod>,
+    pub weekly: Vec<AnalyticsPeriod>,
+    pub directions: Vec<AnalyticsDirection>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsPeriod {
+    pub label: String,
+    pub applications: i64,
+    pub interviews: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyticsDirection {
+    pub name: String,
+    pub count: i64,
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
@@ -258,6 +325,7 @@ impl Database {
         Self::migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            path: Mutex::new(path.to_path_buf()),
         })
     }
 
@@ -268,7 +336,52 @@ impl Database {
         Self::migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            path: Mutex::new(PathBuf::from(":memory:")),
         })
+    }
+
+    pub fn storage_path(&self) -> Result<String, String> {
+        Ok(self
+            .path
+            .lock()
+            .map_err(|_| "数据路径锁已损坏".to_string())?
+            .to_string_lossy()
+            .into_owned())
+    }
+
+    pub fn relocate(&self, directory: &Path) -> Result<String, String> {
+        fs::create_dir_all(directory).map_err(|error| format!("无法创建数据目录: {error}"))?;
+        let target = directory.join("applied-yet.sqlite3");
+        // Keep both guards for the complete checkpoint/copy/swap operation. Every database
+        // reader/writer takes `connection`, so no write can land in the old WAL after the
+        // checkpoint and before the copied database becomes active.
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut path = self
+            .path
+            .lock()
+            .map_err(|_| "数据路径锁已损坏".to_string())?;
+        let current = path.clone();
+        if current == target {
+            return Ok(target.to_string_lossy().into_owned());
+        }
+        if target.exists() {
+            return Err("所选目录已存在同名数据库，请选择其他目录".into());
+        }
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(db_error)?;
+        fs::copy(&current, &target).map_err(|error| format!("移动数据失败: {error}"))?;
+        let replacement = Database::open(&target)?;
+        let replacement_connection = replacement
+            .connection
+            .into_inner()
+            .map_err(|_| "新数据库连接锁已损坏".to_string())?;
+        *connection = replacement_connection;
+        *path = target.clone();
+        Ok(target.to_string_lossy().into_owned())
     }
 
     fn configure(connection: &Connection) -> Result<(), String> {
@@ -297,6 +410,20 @@ impl Database {
             }
 
             let transaction = connection.transaction().map_err(db_error)?;
+            if *version == 9 {
+                let has_recorded_at: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('application_events') WHERE name='recorded_at')",
+                    [], |row| row.get(0),
+                ).map_err(db_error)?;
+                if !has_recorded_at {
+                    transaction
+                        .execute(
+                            "ALTER TABLE application_events ADD COLUMN recorded_at TEXT",
+                            [],
+                        )
+                        .map_err(db_error)?;
+                }
+            }
             transaction.execute_batch(sql).map_err(db_error)?;
             transaction
                 .execute(
@@ -358,12 +485,210 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
     }
 
+    pub fn get_activity_summary(&self) -> Result<ActivitySummary, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let streak_days = connection.query_row(
+            "WITH RECURSIVE activity(day) AS (
+                 SELECT DISTINCT date(happened_at, 'localtime') FROM application_events e
+                 JOIN applications a ON a.id=e.application_id WHERE a.deleted_at IS NULL
+             ), start(day) AS (
+                 SELECT CASE WHEN EXISTS(SELECT 1 FROM activity WHERE day=date('now','localtime')) THEN date('now','localtime')
+                             WHEN EXISTS(SELECT 1 FROM activity WHERE day=date('now','localtime','-1 day')) THEN date('now','localtime','-1 day') END
+             ), streak(day,n) AS (
+                 SELECT day,1 FROM start WHERE day IS NOT NULL
+                 UNION ALL SELECT date(streak.day,'-1 day'),n+1 FROM streak
+                 WHERE EXISTS(SELECT 1 FROM activity WHERE day=date(streak.day,'-1 day'))
+             ) SELECT COALESCE(MAX(n),0) FROM streak",
+            [], |row| row.get(0),
+        ).map_err(db_error)?;
+        let week_start = "date('now','localtime','-' || ((CAST(strftime('%w','now','localtime') AS INTEGER)+6)%7) || ' days')";
+        let this_week_applications = connection.query_row(
+            &format!("SELECT COUNT(*) FROM applications WHERE deleted_at IS NULL AND date(COALESCE(applied_at,created_at),'localtime') >= {week_start}"),
+            [], |row| row.get(0),
+        ).map_err(db_error)?;
+        let previous_week_applications = connection.query_row(
+            &format!("SELECT COUNT(*) FROM applications WHERE deleted_at IS NULL AND date(COALESCE(applied_at,created_at),'localtime') >= date({week_start},'-7 days') AND date(COALESCE(applied_at,created_at),'localtime') < {week_start}"),
+            [], |row| row.get(0),
+        ).map_err(db_error)?;
+        let mut statement = connection.prepare(
+            "WITH RECURSIVE offsets(value) AS (SELECT 13 UNION ALL SELECT value-1 FROM offsets WHERE value>0)
+             SELECT COUNT(a.id) FROM offsets
+             LEFT JOIN application_events e ON date(e.happened_at,'localtime')=date('now','localtime','-' || offsets.value || ' days')
+             LEFT JOIN applications a ON a.id=e.application_id AND a.deleted_at IS NULL
+             GROUP BY offsets.value ORDER BY offsets.value DESC",
+        ).map_err(db_error)?;
+        let daily_activity = statement
+            .query_map([], |row| row.get(0))
+            .map_err(db_error)?
+            .collect::<Result<Vec<i64>, _>>()
+            .map_err(db_error)?;
+        Ok(ActivitySummary {
+            streak_days,
+            this_week_applications,
+            previous_week_applications,
+            daily_activity,
+        })
+    }
+
+    pub fn export_applications_excel(&self, path: &str) -> Result<usize, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut workbook = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<?mso-application progid=\"Excel.Sheet\"?>\n<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\" xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\"><Styles><Style ss:ID=\"Header\"><Font ss:Bold=\"1\"/><Interior ss:Color=\"#DCE6F1\" ss:Pattern=\"Solid\"/></Style><Style ss:ID=\"Timeline\"><Alignment ss:Vertical=\"Top\" ss:WrapText=\"1\"/></Style></Styles>\n",
+        );
+
+        workbook.push_str("<Worksheet ss:Name=\"投递记录\"><Table><Column ss:Index=\"22\" ss:Width=\"420\" ss:StyleID=\"Timeline\"/>");
+        push_excel_row(
+            &mut workbook,
+            &[
+                "投递ID",
+                "公司",
+                "公司简称",
+                "行业",
+                "公司性质",
+                "岗位",
+                "部门",
+                "地点",
+                "招聘类型",
+                "岗位编号",
+                "投递渠道",
+                "投递日期",
+                "优先级",
+                "当前阶段",
+                "下一步行动",
+                "下一步时间",
+                "关联简历",
+                "招聘链接",
+                "公司官网",
+                "JD原文",
+                "公司备注",
+                "事件时间线",
+                "是否归档",
+                "创建时间",
+                "更新时间",
+            ],
+            true,
+        );
+        let mut application_count = 0usize;
+        {
+            let mut statement = connection.prepare(
+                "SELECT a.id,c.name,COALESCE(c.short_name,''),COALESCE(c.industry,''),COALESCE(c.company_type,''),p.title,COALESCE(p.department,''),COALESCE(p.location,''),COALESCE(p.recruitment_type,''),COALESCE(p.job_code,''),COALESCE(a.channel,''),COALESCE(a.applied_at,''),a.priority,a.current_stage,COALESCE(a.next_action,''),COALESCE(a.next_action_due_at,''),COALESCE(rp.name,''),COALESCE(p.source_url,''),COALESCE(c.website,''),COALESCE(p.jd_raw,''),COALESCE(c.notes,''),
+                        COALESCE((SELECT group_concat(timeline_line, char(10)) FROM (
+                            SELECT e.happened_at || '｜' || CASE WHEN e.reverted_at IS NULL THEN '' ELSE '[已撤销]' END || e.title ||
+                                   CASE WHEN e.stage_before IS NOT NULL AND e.stage_after IS NOT NULL THEN '（' || e.stage_before || ' → ' || e.stage_after || '）' ELSE '' END ||
+                                   CASE WHEN e.content IS NOT NULL AND trim(e.content) <> '' THEN '：' || replace(replace(e.content, char(13), ' '), char(10), ' ') ELSE '' END AS timeline_line
+                            FROM application_events e WHERE e.application_id=a.id
+                            ORDER BY e.happened_at,e.created_at,e.rowid
+                        )),''),
+                        CASE WHEN a.archived_at IS NULL THEN '否' ELSE '是' END,a.created_at,a.updated_at
+                 FROM applications a JOIN positions p ON p.id=a.position_id JOIN companies c ON c.id=p.company_id LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id
+                 WHERE a.deleted_at IS NULL AND p.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY a.created_at DESC",
+            ).map_err(db_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    let priority: i64 = row.get(12)?;
+                    Ok(vec![
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        priority_label(priority).to_string(),
+                        row.get(13)?,
+                        row.get(14)?,
+                        row.get(15)?,
+                        row.get(16)?,
+                        row.get(17)?,
+                        row.get(18)?,
+                        row.get(19)?,
+                        row.get(20)?,
+                        row.get(21)?,
+                        row.get(22)?,
+                        row.get(23)?,
+                        row.get(24)?,
+                    ])
+                })
+                .map_err(db_error)?;
+            for row in rows {
+                let row = row.map_err(db_error)?;
+                let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+                push_excel_row(&mut workbook, &cells, false);
+                application_count += 1;
+            }
+        }
+        workbook.push_str("</Table></Worksheet>\n");
+
+        workbook.push_str("<Worksheet ss:Name=\"流程与状态变更\"><Table>");
+        push_excel_row(
+            &mut workbook,
+            &[
+                "事件ID",
+                "投递ID",
+                "公司",
+                "岗位",
+                "事件类型",
+                "事件标题",
+                "详细内容",
+                "来源",
+                "变更前阶段",
+                "变更后阶段",
+                "发生时间",
+                "首次记录时间",
+                "最后编辑时间",
+                "是否可撤销",
+                "是否已撤销",
+                "撤销时间",
+            ],
+            true,
+        );
+        {
+            let mut statement = connection.prepare(
+                "SELECT e.id,e.application_id,c.name,p.title,e.event_type,e.title,COALESCE(e.content,''),e.source_type,COALESCE(e.stage_before,''),COALESCE(e.stage_after,''),e.happened_at,e.created_at,COALESCE(e.updated_at,e.created_at),CASE WHEN e.reversible=1 THEN '是' ELSE '否' END,CASE WHEN e.reverted_at IS NULL THEN '否' ELSE '是' END,COALESCE(e.reverted_at,'')
+                 FROM application_events e JOIN applications a ON a.id=e.application_id JOIN positions p ON p.id=a.position_id JOIN companies c ON c.id=p.company_id
+                 WHERE a.deleted_at IS NULL ORDER BY e.happened_at DESC,e.created_at DESC,e.rowid DESC",
+            ).map_err(db_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((0..16)
+                        .map(|index| row.get::<_, String>(index))
+                        .collect::<Result<Vec<_>, _>>()?)
+                })
+                .map_err(db_error)?;
+            for row in rows {
+                let row = row.map_err(db_error)?;
+                let cells: Vec<&str> = row.iter().map(String::as_str).collect();
+                push_excel_row(&mut workbook, &cells, false);
+            }
+        }
+        workbook.push_str("</Table></Worksheet></Workbook>");
+        fs::write(path, workbook.as_bytes())
+            .map_err(|error| format!("导出 Excel 失败: {error}"))?;
+        Ok(application_count)
+    }
+
     pub fn create_application(
         &self,
         input: CreateApplicationInput,
     ) -> Result<ApplicationListItem, String> {
         let company_name = required(input.company_name, "公司名称")?;
         let position_title = required(input.position_title, "岗位名称")?;
+        let priority = input.priority.unwrap_or(2);
+        let applied_at = clean(input.applied_at);
+        if !(1..=3).contains(&priority) {
+            return Err("优先级必须在 1 到 3 之间".to_string());
+        }
         let mut connection = self
             .connection
             .lock()
@@ -385,11 +710,15 @@ impl Database {
                 params![company_id, company_name],
             )
             .map_err(db_error)?;
+        transaction.execute(
+            "UPDATE companies SET short_name=COALESCE(?2,short_name),industry=COALESCE(?3,industry),company_type=COALESCE(?4,company_type),website=COALESCE(?5,website),notes=COALESCE(?6,notes),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![company_id, clean(input.company_short_name), clean(input.industry), clean(input.company_type), clean(input.website), clean(input.company_notes)],
+        ).map_err(db_error)?;
 
         let position_id = Uuid::new_v4().to_string();
         transaction.execute(
-            "INSERT INTO positions(id, company_id, title, location, jd_raw) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![position_id, company_id, position_title, clean(input.location), clean(input.jd_raw)],
+            "INSERT INTO positions(id, company_id, title, department, location, recruitment_type, job_code, source_url, jd_raw) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![position_id, company_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), clean(input.source_url), clean(input.jd_raw)],
         ).map_err(db_error)?;
 
         let resume_profile_id = match clean(input.resume_profile_id) {
@@ -407,12 +736,14 @@ impl Database {
         };
         let application_id = Uuid::new_v4().to_string();
         transaction.execute(
-            "INSERT INTO applications(id, position_id, applied_at, channel, resume_profile_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![application_id, position_id, clean(input.applied_at), clean(input.channel), resume_profile_id],
+            "INSERT INTO applications(id, position_id, applied_at, channel, priority, resume_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![application_id, position_id, applied_at.clone(), clean(input.channel), priority, resume_profile_id],
         ).map_err(db_error)?;
         transaction.execute(
-            "INSERT INTO application_events(id, application_id, event_type, title, source_type, stage_after) VALUES (?1, ?2, 'application_created', '创建投递', 'manual', '已投递')",
-            params![Uuid::new_v4().to_string(), application_id],
+            "INSERT INTO application_events(id, application_id, event_type, title, source_type, stage_after, happened_at)
+             VALUES (?1, ?2, 'application_created', '创建投递', 'manual', '已投递',
+                     COALESCE(?3 || 'T00:00:00.000Z', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
+            params![Uuid::new_v4().to_string(), application_id, applied_at],
         ).map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         drop(connection);
@@ -440,13 +771,57 @@ impl Database {
         if before == stage {
             return Ok(());
         }
+        let recent_drag_event = transaction
+            .query_row(
+                "SELECT id, stage_before FROM application_events
+                 WHERE application_id=?1 AND event_type='stage_changed' AND source_id='board_drag'
+                   AND reverted_at IS NULL AND julianday(COALESCE(recorded_at, created_at)) >= julianday('now', '-5 minutes')
+                 ORDER BY COALESCE(recorded_at, created_at) DESC, rowid DESC LIMIT 1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
         transaction.execute(
             "UPDATE applications SET current_stage = ?2, status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
             params![id, stage],
         ).map_err(db_error)?;
+        if let Some((event_id, original_stage)) = recent_drag_event {
+            if original_stage == stage {
+                // The coalesced A -> ... -> A operation has no visible milestone, but keep
+                // the superseded event as reverted audit data instead of destroying history.
+                transaction
+                    .execute(
+                        "UPDATE application_events
+                     SET reverted_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                         updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                         recorded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                     WHERE id=?1",
+                        [&event_id],
+                    )
+                    .map_err(db_error)?;
+            } else {
+                transaction.execute(
+                    "UPDATE application_events SET stage_after=?2, happened_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), recorded_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=?1",
+                    params![event_id, stage],
+                ).map_err(db_error)?;
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO application_events(id, application_id, event_type, title, source_type, source_id, stage_before, stage_after, reversible)
+                 VALUES (?1, ?2, 'stage_changed', '更新投递阶段', 'manual', 'board_drag', ?3, ?4, 1)",
+                params![Uuid::new_v4().to_string(), id, before, stage],
+            ).map_err(db_error)?;
+        }
+        let (effective_stage, effective_time) = transaction.query_row(
+            "SELECT stage_after, happened_at FROM application_events
+             WHERE application_id=?1 AND stage_after IS NOT NULL AND reverted_at IS NULL AND event_type <> 'event_reverted'
+             ORDER BY happened_at DESC, created_at DESC, rowid DESC LIMIT 1",
+            [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).map_err(db_error)?;
         transaction.execute(
-            "INSERT INTO application_events(id, application_id, event_type, title, source_type, stage_before, stage_after, reversible) VALUES (?1, ?2, 'stage_changed', '更新投递阶段', 'manual', ?3, ?4, 1)",
-            params![Uuid::new_v4().to_string(), id, before, stage],
+            "UPDATE applications SET current_stage=?2, status_updated_at=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![id, effective_stage, effective_time],
         ).map_err(db_error)?;
         transaction.commit().map_err(db_error)
     }
@@ -466,7 +841,7 @@ impl Database {
                  FROM applications a
                  JOIN positions p ON p.id = a.position_id
                  JOIN companies c ON c.id = p.company_id
-                 LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id
+                 LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id AND rp.deleted_at IS NULL
                  WHERE a.id = ?1 AND a.deleted_at IS NULL AND p.deleted_at IS NULL AND c.deleted_at IS NULL",
                 [id],
                 |row| {
@@ -519,6 +894,7 @@ impl Database {
         let company_name = required(input.company_name, "公司名称")?;
         let position_title = required(input.position_title, "岗位名称")?;
         let current_stage = required(input.current_stage, "当前阶段")?;
+        let applied_at = clean(input.applied_at);
         if !(1..=3).contains(&input.priority) {
             return Err("优先级必须在 1 到 3 之间".to_string());
         }
@@ -528,10 +904,10 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
-        let (company_id, position_id, stage_before, resume_before, resume_name_before) =
+        let (company_id, position_id, stage_before, resume_before, resume_name_before, applied_before) =
             transaction
                 .query_row(
-                    "SELECT p.company_id,a.position_id,a.current_stage,a.resume_profile_id,rp.name
+                    "SELECT p.company_id,a.position_id,a.current_stage,a.resume_profile_id,rp.name,a.applied_at
                  FROM applications a JOIN positions p ON p.id=a.position_id
                  LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id
                  WHERE a.id=?1 AND a.deleted_at IS NULL",
@@ -543,6 +919,7 @@ impl Database {
                             row.get::<_, String>(2)?,
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
                         ))
                     },
                 )
@@ -575,8 +952,43 @@ impl Database {
             "UPDATE applications SET applied_at = ?2, channel = ?3, priority = ?4, current_stage = ?5, next_action = ?6, next_action_due_at = ?7, resume_profile_id=?8,
                     status_updated_at = CASE WHEN current_stage <> ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE status_updated_at END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![id, clean(input.applied_at), clean(input.channel), input.priority, current_stage, clean(input.next_action), clean(input.next_action_due_at), resume_profile_id],
+            params![id, applied_at.clone(), clean(input.channel), input.priority, current_stage, clean(input.next_action), clean(input.next_action_due_at), resume_profile_id],
         ).map_err(db_error)?;
+
+        if applied_before != applied_at {
+            if let Some(first_stage_time) = transaction
+                .query_row(
+                    "SELECT happened_at FROM application_events
+                 WHERE application_id=?1 AND event_type='stage_changed' AND reverted_at IS NULL
+                 ORDER BY rowid LIMIT 1",
+                    [id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(db_error)?
+            {
+                if let Some(date) = applied_at.as_deref() {
+                    let after_first_stage: bool = transaction
+                        .query_row(
+                            "SELECT julianday(?1 || 'T00:00:00.000Z') > julianday(?2)",
+                            params![date, first_stage_time],
+                            |row| row.get(0),
+                        )
+                        .map_err(db_error)?;
+                    if after_first_stage {
+                        return Err(format!(
+                            "投递日期不能晚于首个状态变更（{first_stage_time}）"
+                        ));
+                    }
+                }
+            }
+            transaction.execute(
+                "UPDATE application_events
+                 SET happened_at=COALESCE(?2 || 'T00:00:00.000Z', created_at), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE application_id=?1 AND event_type='application_created'",
+                params![id, applied_at],
+            ).map_err(db_error)?;
+        }
 
         let stage_changed = stage_before != current_stage;
         let resume_changed = resume_before != resume_profile_id;
@@ -791,6 +1203,38 @@ impl Database {
         transaction.commit().map_err(db_error)
     }
 
+    pub fn delete_archived_application(&self, id: &str) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let archived = transaction
+            .query_row(
+                "SELECT archived_at IS NOT NULL FROM applications WHERE id=?1 AND deleted_at IS NULL",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "投递记录不存在或已经删除".to_string())?;
+        if !archived {
+            return Err("只能删除已归档的投递，请先归档后再删除".to_string());
+        }
+        transaction
+            .execute(
+                "INSERT INTO application_events(id, application_id, event_type, title, source_type)
+             VALUES (?1, ?2, 'application_deleted', '删除已归档投递', 'manual')",
+                params![Uuid::new_v4().to_string(), id],
+            )
+            .map_err(db_error)?;
+        transaction.execute(
+            "UPDATE applications SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            [id],
+        ).map_err(db_error)?;
+        transaction.commit().map_err(db_error)
+    }
+
     pub fn revert_application_event(&self, event_id: &str) -> Result<ApplicationDetail, String> {
         let mut connection = self
             .connection
@@ -804,31 +1248,113 @@ impl Database {
         if !reversible || reverted_at.is_some() {
             return Err("该事件不可撤销或已经撤销".to_string());
         }
-        let stage_before = stage_before.ok_or_else(|| "事件缺少原阶段".to_string())?;
-        let stage_after = stage_after.ok_or_else(|| "事件缺少目标阶段".to_string())?;
-        let current_stage: String = transaction
-            .query_row(
-                "SELECT current_stage FROM applications WHERE id = ?1 AND deleted_at IS NULL",
-                [&application_id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        if current_stage != stage_after {
-            return Err(format!(
-                "当前阶段已变为“{current_stage}”，不能撤销“{stage_after}”"
-            ));
-        }
-        transaction.execute(
-            "UPDATE applications SET current_stage = ?2, status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![application_id, stage_before],
-        ).map_err(db_error)?;
+        let _stage_before = stage_before.ok_or_else(|| "事件缺少原阶段".to_string())?;
+        let _stage_after = stage_after.ok_or_else(|| "事件缺少目标阶段".to_string())?;
         transaction.execute(
             "UPDATE application_events SET reverted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1", [event_id],
         ).map_err(db_error)?;
+        // 允许撤销任意一条仍有效的阶段事件，并从剩余有效历史重算当前阶段。
+        // 这样既能清理连续误拖产生的中间记录，也不会因撤销较早事件而破坏后续状态。
+        let (effective_stage, effective_time) = transaction.query_row(
+            "SELECT stage_after, happened_at FROM application_events
+             WHERE application_id=?1 AND stage_after IS NOT NULL AND reverted_at IS NULL AND event_type <> 'event_reverted'
+             ORDER BY happened_at DESC,created_at DESC,rowid DESC LIMIT 1",
+            [&application_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).map_err(db_error)?;
         transaction.execute(
-            "INSERT INTO application_events(id, application_id, event_type, title, content, source_type, source_id, stage_before, stage_after)
-             VALUES (?1, ?2, 'event_reverted', '撤销阶段变更', ?3, 'manual', ?4, ?5, ?6)",
-            params![Uuid::new_v4().to_string(), application_id, format!("{stage_after} → {stage_before}"), event_id, stage_after, stage_before],
+            "UPDATE applications SET current_stage = ?2, status_updated_at = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            params![application_id, effective_stage, effective_time],
+        ).map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        self.get_application_detail(&application_id)
+    }
+
+    pub fn update_application_event_time(
+        &self,
+        event_id: &str,
+        happened_at: &str,
+    ) -> Result<ApplicationDetail, String> {
+        let happened_at = required(happened_at.to_string(), "发生时间")?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let valid: bool = transaction
+            .query_row("SELECT julianday(?1) IS NOT NULL", [&happened_at], |row| {
+                row.get(0)
+            })
+            .map_err(db_error)?;
+        if !valid {
+            return Err("发生时间格式无效".to_string());
+        }
+        let (row_id, application_id, event_type, current_time, reverted_at) = transaction
+            .query_row(
+                "SELECT rowid, application_id, event_type, happened_at, reverted_at FROM application_events WHERE id=?1",
+                [event_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?)),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "事件不存在".to_string())?;
+        if event_type != "stage_changed" {
+            return Err("只能修改状态变更事件的发生时间".to_string());
+        }
+        if reverted_at.is_some() {
+            return Err("已撤销的状态事件不能修改时间".to_string());
+        }
+        let previous_time = transaction.query_row(
+            "SELECT happened_at FROM application_events
+             WHERE application_id=?1 AND id<>?2 AND reverted_at IS NULL AND stage_after IS NOT NULL
+               AND event_type IN ('application_created','stage_changed')
+               AND (julianday(happened_at)<julianday(?3) OR (julianday(happened_at)=julianday(?3) AND rowid<?4))
+             ORDER BY happened_at DESC, created_at DESC, rowid DESC LIMIT 1",
+            params![application_id, event_id, current_time, row_id], |row| row.get::<_, String>(0),
+        ).optional().map_err(db_error)?;
+        let next_time = transaction.query_row(
+            "SELECT happened_at FROM application_events
+             WHERE application_id=?1 AND id<>?2 AND reverted_at IS NULL AND event_type='stage_changed'
+               AND (julianday(happened_at)>julianday(?3) OR (julianday(happened_at)=julianday(?3) AND rowid>?4))
+             ORDER BY happened_at, created_at, rowid LIMIT 1",
+            params![application_id, event_id, current_time, row_id], |row| row.get::<_, String>(0),
+        ).optional().map_err(db_error)?;
+        if let Some(previous) = previous_time.as_deref() {
+            let before_previous: bool = transaction
+                .query_row(
+                    "SELECT julianday(?1) < julianday(?2)",
+                    params![happened_at, previous],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if before_previous {
+                return Err(format!("发生时间不能早于上一流程节点（{previous}）"));
+            }
+        }
+        if let Some(next) = next_time.as_deref() {
+            let after_next: bool = transaction
+                .query_row(
+                    "SELECT julianday(?1) > julianday(?2)",
+                    params![happened_at, next],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if after_next {
+                return Err(format!("发生时间不能晚于下一流程节点（{next}）"));
+            }
+        }
+        transaction.execute(
+            "UPDATE application_events SET happened_at=?2, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![event_id, happened_at],
+        ).map_err(db_error)?;
+        let (effective_stage, effective_time) = transaction.query_row(
+            "SELECT stage_after, happened_at FROM application_events
+             WHERE application_id=?1 AND stage_after IS NOT NULL AND reverted_at IS NULL AND event_type <> 'event_reverted'
+             ORDER BY happened_at DESC, created_at DESC, rowid DESC LIMIT 1",
+            [&application_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).map_err(db_error)?;
+        transaction.execute(
+            "UPDATE applications SET current_stage=?2, status_updated_at=?3, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+            params![application_id, effective_stage, effective_time],
         ).map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         drop(connection);
@@ -881,6 +1407,25 @@ impl Database {
         Ok(())
     }
 
+    pub fn release_task_reminder_delivery(
+        &self,
+        task_id: &str,
+        notified_at: &str,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        connection
+            .execute(
+                "UPDATE tasks SET reminder_notified_at = NULL
+             WHERE id = ?1 AND deleted_at IS NULL AND reminder_notified_at = ?2",
+                params![task_id, notified_at],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
     pub fn get_provider_settings(&self) -> Result<ProviderSettings, String> {
         let connection = self
             .connection
@@ -902,7 +1447,7 @@ impl Database {
             )
             .optional()
             .map_err(db_error)?;
-        let ai = ai_json
+        let ai: AiProviderSettings = ai_json
             .map(|value| serde_json::from_str(&value).map_err(json_error))
             .transpose()?
             .unwrap_or_default();
@@ -910,7 +1455,19 @@ impl Database {
             .map(|value| serde_json::from_str(&value).map_err(json_error))
             .transpose()?
             .unwrap_or_default();
-        Ok(ProviderSettings { ai, asr })
+        let email_json = connection
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key='email'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let email = email_json
+            .map(|value| serde_json::from_str(&value).map_err(json_error))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(ProviderSettings { ai, asr, email })
     }
 
     pub fn save_ai_settings(&self, settings: AiProviderSettings) -> Result<(), String> {
@@ -949,6 +1506,35 @@ impl Database {
         self.save_provider_json("asr", &settings)
     }
 
+    pub fn save_email_settings(&self, settings: EmailSettings) -> Result<(), String> {
+        if settings.enabled
+            && (settings.email_address.trim().is_empty()
+                || settings.imap_host.trim().is_empty()
+                || settings.username.trim().is_empty())
+        {
+            return Err("启用邮箱检查前，请填写邮箱地址、IMAP 服务器和用户名".into());
+        }
+        if !(1..=65535).contains(&settings.imap_port) {
+            return Err("IMAP 端口无效".into());
+        }
+        if !(1..=1440).contains(&settings.polling_minutes) {
+            return Err("检查间隔必须在 1 到 1440 分钟之间".into());
+        }
+        if !matches!(settings.auth_method.as_str(), "password" | "oauth2") {
+            return Err("邮箱认证方式无效".into());
+        }
+        if settings.auth_method == "oauth2" && settings.oauth_client_id.trim().is_empty() {
+            return Err("使用 OAuth2 前请填写桌面应用 Client ID".into());
+        }
+        let value = serde_json::to_string(&settings).map_err(json_error)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        connection.execute("INSERT INTO app_settings(key,value_json) VALUES ('email',?1) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", [value]).map_err(db_error)?;
+        Ok(())
+    }
+
     fn save_provider_json<T: Serialize>(&self, provider: &str, settings: &T) -> Result<(), String> {
         let value = serde_json::to_string(settings).map_err(json_error)?;
         let connection = self
@@ -981,7 +1567,7 @@ impl Database {
                  FROM applications a
                  JOIN positions p ON p.id = a.position_id
                  JOIN companies c ON c.id = p.company_id
-                 LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id
+                 LEFT JOIN resume_profiles rp ON rp.id=a.resume_profile_id AND rp.deleted_at IS NULL
                 WHERE a.id = ?1 AND a.deleted_at IS NULL",
                 [application_id],
                 |row| {
@@ -1262,9 +1848,9 @@ impl Database {
                     internship_experience,project_experience,professional_skills,academic_achievements,
                     skill_certificates,target_direction,notes,parent_profile_id,
                     (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL),
-                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND (a.current_stage LIKE '%测评%' OR a.current_stage LIKE '%笔试%' OR EXISTS(SELECT 1 FROM application_events e WHERE e.application_id=a.id AND (e.stage_after LIKE '%测评%' OR e.stage_after LIKE '%笔试%')))),
-                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND (a.current_stage LIKE '%面%' OR a.current_stage LIKE '%HR%' OR EXISTS(SELECT 1 FROM application_events e WHERE e.application_id=a.id AND (e.stage_after LIKE '%面%' OR e.stage_after LIKE '%HR%')))),
-                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND (lower(a.current_stage) LIKE '%offer%' OR EXISTS(SELECT 1 FROM application_events e WHERE e.application_id=a.id AND lower(e.stage_after) LIKE '%offer%'))),
+                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND ((a.current_stage LIKE '%测评%' OR a.current_stage LIKE '%笔试%') OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=a.id AND e.reverted_at IS NULL AND (e.stage_after LIKE '%测评%' OR e.stage_after LIKE '%笔试%')))),
+                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND ((a.current_stage LIKE '%面试%' OR a.current_stage LIKE '%HR%') OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=a.id AND e.reverted_at IS NULL AND (e.stage_after LIKE '%面试%' OR e.stage_after LIKE '%HR%')))),
+                    (SELECT COUNT(*) FROM applications a WHERE a.resume_profile_id=resume_profiles.id AND a.deleted_at IS NULL AND (lower(a.current_stage) LIKE '%offer%' OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=a.id AND e.reverted_at IS NULL AND lower(e.stage_after) LIKE '%offer%'))),
                     is_primary,archived_at,created_at,updated_at
              FROM resume_profiles WHERE deleted_at IS NULL
              ORDER BY archived_at IS NOT NULL, is_primary DESC, updated_at DESC",
@@ -1343,54 +1929,22 @@ impl Database {
         input: UpdateResumeProfileInput,
     ) -> Result<ResumeProfile, String> {
         let name = required(input.name, "简历名称")?;
-        let mut connection = self
+        let connection = self
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
-        let transaction = connection.transaction().map_err(db_error)?;
-        let linked_count = transaction
-            .query_row(
-                "SELECT COUNT(*) FROM applications WHERE resume_profile_id=?1 AND deleted_at IS NULL",
-                [id],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(db_error)?;
-        let target_id = if linked_count > 0 {
-            let new_id = Uuid::new_v4().to_string();
-            transaction
-                .execute(
-                    "UPDATE resume_profiles SET is_primary=0 WHERE deleted_at IS NULL",
-                    [],
-                )
-                .map_err(db_error)?;
-            let changed = transaction.execute(
-                "INSERT INTO resume_profiles(id,name,file_path,file_format,parsed_text,personal_info,education_background,
-                 internship_experience,project_experience,professional_skills,academic_achievements,skill_certificates,
-                 target_direction,notes,parent_profile_id,is_primary)
-                 SELECT ?2,?3,file_path,file_format,parsed_text,?4,?5,?6,?7,?8,?9,?10,?11,?12,id,1
-                 FROM resume_profiles WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL",
-                params![id, new_id, name, input.personal_info, input.education_background, input.internship_experience, input.project_experience, input.professional_skills, input.academic_achievements, input.skill_certificates, input.target_direction, input.notes],
-            ).map_err(db_error)?;
-            if changed == 0 {
-                return Err("简历不存在或已归档".to_string());
-            }
-            new_id
-        } else {
-            let changed = transaction.execute(
-                "UPDATE resume_profiles SET name=?2,personal_info=?3,education_background=?4,internship_experience=?5,
-                 project_experience=?6,professional_skills=?7,academic_achievements=?8,skill_certificates=?9,
-                 target_direction=?10,notes=?11,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                 WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL",
-                params![id, name, input.personal_info, input.education_background, input.internship_experience, input.project_experience, input.professional_skills, input.academic_achievements, input.skill_certificates, input.target_direction, input.notes],
-            ).map_err(db_error)?;
-            if changed == 0 {
-                return Err("简历不存在或已归档".to_string());
-            }
-            id.to_string()
-        };
-        transaction.commit().map_err(db_error)?;
+        let changed = connection.execute(
+            "UPDATE resume_profiles SET name=?2,personal_info=?3,education_background=?4,internship_experience=?5,
+             project_experience=?6,professional_skills=?7,academic_achievements=?8,skill_certificates=?9,
+             target_direction=?10,notes=?11,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL",
+            params![id, name, input.personal_info, input.education_background, input.internship_experience, input.project_experience, input.professional_skills, input.academic_achievements, input.skill_certificates, input.target_direction, input.notes],
+        ).map_err(db_error)?;
+        if changed == 0 {
+            return Err("简历不存在或已归档".to_string());
+        }
         drop(connection);
-        self.get_resume_profile(&target_id)
+        self.get_resume_profile(id)
     }
 
     pub fn set_primary_resume_profile(&self, id: &str) -> Result<(), String> {
@@ -1419,12 +1973,8 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
-        let linked_count = transaction.query_row("SELECT COUNT(*) FROM applications WHERE resume_profile_id=?1 AND deleted_at IS NULL", [id], |row| row.get::<_, i64>(0)).map_err(db_error)?;
-        let changed = if linked_count > 0 {
-            transaction.execute("UPDATE resume_profiles SET archived_at=COALESCE(archived_at,strftime('%Y-%m-%dT%H:%M:%fZ','now')),is_primary=0 WHERE id=?1 AND deleted_at IS NULL", [id]).map_err(db_error)?
-        } else {
-            transaction.execute("UPDATE resume_profiles SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),is_primary=0 WHERE id=?1 AND deleted_at IS NULL", [id]).map_err(db_error)?
-        };
+        transaction.execute("UPDATE applications SET resume_profile_id=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE resume_profile_id=?1 AND deleted_at IS NULL", [id]).map_err(db_error)?;
+        let changed = transaction.execute("UPDATE resume_profiles SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),is_primary=0 WHERE id=?1 AND deleted_at IS NULL", [id]).map_err(db_error)?;
         if changed == 0 {
             return Err("简历不存在".to_string());
         }
@@ -1517,7 +2067,7 @@ impl Database {
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let summary = connection.query_row(
             "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN current_stage NOT LIKE '%拒绝%' AND lower(current_stage) NOT LIKE '%offer%' AND current_stage NOT IN ('流程结束', '主动放弃') THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN current_stage NOT LIKE '%拒绝%' AND lower(current_stage) NOT LIKE '%offer%' AND current_stage NOT LIKE '%人才库%' AND current_stage NOT IN ('流程暂停', '流程结束', '主动放弃') THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN current_stage LIKE '%测评%' OR current_stage LIKE '%笔试%' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN current_stage LIKE '%面%' OR current_stage LIKE '%HR%' THEN 1 ELSE 0 END), 0),
                     COALESCE(SUM(CASE WHEN current_stage LIKE '%等待%' THEN 1 ELSE 0 END), 0),
@@ -1578,6 +2128,19 @@ impl Database {
              SELECT 'next:' || a.id, a.id, COALESCE(a.next_action, '下一步行动'), c.name, p.title, a.next_action_due_at, 'next_action', a.current_stage
              FROM applications a JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
              WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND a.next_action_due_at >= ?1 AND a.next_action_due_at < ?2
+             UNION ALL
+             SELECT 'milestone:' || e.id, a.id,
+                    CASE WHEN e.event_type = 'application_created' THEN '新增投递'
+                         WHEN e.stage_after IS NOT NULL THEN '进入' || e.stage_after
+                         ELSE e.title END,
+                    c.name, p.title, e.happened_at, 'milestone', COALESCE(e.stage_after, a.current_stage)
+             FROM application_events e
+             JOIN applications a ON a.id = e.application_id
+             JOIN positions p ON p.id = a.position_id
+             JOIN companies c ON c.id = p.company_id
+             WHERE a.deleted_at IS NULL AND a.archived_at IS NULL
+               AND e.reverted_at IS NULL AND e.event_type IN ('application_created', 'stage_changed', 'email_status')
+               AND e.happened_at >= ?1 AND e.happened_at < ?2
              ORDER BY 6",
         ).map_err(db_error)?;
         let event_rows = event_statement
@@ -1603,6 +2166,51 @@ impl Database {
             tasks,
             events,
         })
+    }
+
+    pub fn get_analytics(&self) -> Result<AnalyticsData, String> {
+        let connection = self.connection.lock().map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let (total, this_month, previous_month, assessments, interviews, offers) = connection.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN date(COALESCE(applied_at,created_at),'localtime') >= date('now','localtime','start of month') THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN date(COALESCE(applied_at,created_at),'localtime') >= date('now','localtime','start of month','-1 month') AND date(COALESCE(applied_at,created_at),'localtime') < date('now','localtime','start of month') THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN (current_stage LIKE '%测评%' OR current_stage LIKE '%笔试%' OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=applications.id AND e.reverted_at IS NULL AND (e.stage_after LIKE '%测评%' OR e.stage_after LIKE '%笔试%'))) THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN (current_stage LIKE '%面%' OR current_stage LIKE '%HR%' OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=applications.id AND e.reverted_at IS NULL AND (e.stage_after LIKE '%面%' OR e.stage_after LIKE '%HR%'))) THEN 1 ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN (lower(current_stage) LIKE '%offer%' OR EXISTS (SELECT 1 FROM application_events e WHERE e.application_id=applications.id AND e.reverted_at IS NULL AND lower(e.stage_after) LIKE '%offer%')) THEN 1 ELSE 0 END),0)
+             FROM applications WHERE deleted_at IS NULL AND archived_at IS NULL",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        ).map_err(db_error)?;
+
+        let average_feedback_days = connection.query_row(
+            "SELECT AVG(julianday((SELECT MIN(e.happened_at) FROM application_events e WHERE e.application_id=a.id AND e.reverted_at IS NULL AND e.event_type <> 'application_created')) - julianday(COALESCE(a.applied_at,a.created_at)))
+             FROM applications a WHERE a.deleted_at IS NULL AND a.archived_at IS NULL",
+            [], |row| row.get::<_, Option<f64>>(0),
+        ).map_err(db_error)?.map(|value| value.max(0.0));
+
+        let periods = |sql: &str| -> Result<Vec<AnalyticsPeriod>, String> {
+            let mut statement = connection.prepare(sql).map_err(db_error)?;
+            let rows = statement.query_map([], |row| Ok(AnalyticsPeriod { label: row.get(0)?, applications: row.get(1)?, interviews: row.get(2)? })).map_err(db_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+        };
+        let daily = periods(
+            "WITH RECURSIVE periods(n,start_at) AS (SELECT 0,date('now','localtime','-6 days') UNION ALL SELECT n+1,date(start_at,'+1 day') FROM periods WHERE n<6)
+             SELECT strftime('%m/%d',start_at),
+                    (SELECT COUNT(*) FROM applications a WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND date(COALESCE(a.applied_at,a.created_at),'localtime')=periods.start_at),
+                    (SELECT COUNT(DISTINCT e.application_id) FROM application_events e JOIN applications a ON a.id=e.application_id WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND e.reverted_at IS NULL AND (e.stage_after LIKE '%面%' OR e.stage_after LIKE '%HR%') AND date(e.happened_at,'localtime')=periods.start_at)
+             FROM periods ORDER BY start_at"
+        )?;
+        let weekly = periods(
+            "WITH RECURSIVE periods(n,start_at) AS (SELECT 0,date('now','localtime','-55 days') UNION ALL SELECT n+1,date(start_at,'+7 days') FROM periods WHERE n<7)
+             SELECT strftime('%m/%d',start_at),
+                    (SELECT COUNT(*) FROM applications a WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND date(COALESCE(a.applied_at,a.created_at),'localtime')>=periods.start_at AND date(COALESCE(a.applied_at,a.created_at),'localtime')<date(periods.start_at,'+7 days')),
+                    (SELECT COUNT(DISTINCT e.application_id) FROM application_events e JOIN applications a ON a.id=e.application_id WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND e.reverted_at IS NULL AND (e.stage_after LIKE '%面%' OR e.stage_after LIKE '%HR%') AND date(e.happened_at,'localtime')>=periods.start_at AND date(e.happened_at,'localtime')<date(periods.start_at,'+7 days'))
+             FROM periods ORDER BY start_at"
+        )?;
+        let mut direction_statement = connection.prepare(
+            "SELECT COALESCE(NULLIF(TRIM(p.direction),''),p.title),COUNT(*) FROM applications a JOIN positions p ON p.id=a.position_id WHERE a.deleted_at IS NULL AND a.archived_at IS NULL GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 6"
+        ).map_err(db_error)?;
+        let directions = direction_statement.query_map([], |row| Ok(AnalyticsDirection { name: row.get(0)?, count: row.get(1)? })).map_err(db_error)?.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
+        Ok(AnalyticsData { total, this_month, previous_month, assessments, interviews, offers, average_feedback_days, daily, weekly, directions })
     }
 
     fn get_application(&self, id: &str) -> Result<Option<ApplicationListItem>, String> {
@@ -1647,8 +2255,8 @@ fn query_events(
     application_id: &str,
 ) -> Result<Vec<ApplicationEvent>, String> {
     let mut statement = connection.prepare(
-        "SELECT id, event_type, title, content, source_type, stage_before, stage_after, happened_at, reversible, reverted_at
-         FROM application_events WHERE application_id = ?1 ORDER BY happened_at DESC, created_at DESC",
+        "SELECT id, event_type, title, content, source_type, stage_before, stage_after, happened_at, COALESCE(updated_at, created_at), reversible, reverted_at
+         FROM application_events WHERE application_id = ?1 ORDER BY happened_at DESC, created_at DESC, rowid DESC",
     ).map_err(db_error)?;
     let rows = statement
         .query_map([application_id], |row| {
@@ -1661,8 +2269,9 @@ fn query_events(
                 stage_before: row.get(5)?,
                 stage_after: row.get(6)?,
                 happened_at: row.get(7)?,
-                reversible: row.get(8)?,
-                reverted_at: row.get(9)?,
+                updated_at: row.get(8)?,
+                reversible: row.get(9)?,
+                reverted_at: row.get(10)?,
             })
         })
         .map_err(db_error)?;
@@ -1673,6 +2282,31 @@ fn clean(value: Option<String>) -> Option<String> {
     value
         .map(|item| item.trim().to_string())
         .filter(|item| !item.is_empty())
+}
+
+fn push_excel_row(target: &mut String, cells: &[&str], header: bool) {
+    target.push_str("<Row>");
+    for cell in cells {
+        if header {
+            target.push_str("<Cell ss:StyleID=\"Header\">");
+        } else {
+            target.push_str("<Cell>");
+        }
+        target.push_str("<Data ss:Type=\"String\">");
+        for character in cell.chars() {
+            match character {
+                '&' => target.push_str("&amp;"),
+                '<' => target.push_str("&lt;"),
+                '>' => target.push_str("&gt;"),
+                '\"' => target.push_str("&quot;"),
+                '\'' => target.push_str("&apos;"),
+                value if value.is_control() && !matches!(value, '\n' | '\r' | '\t') => {}
+                value => target.push(value),
+            }
+        }
+        target.push_str("</Data></Cell>");
+    }
+    target.push_str("</Row>\n");
 }
 
 fn parse_json_or_text(value: &str) -> serde_json::Value {
@@ -1726,20 +2360,20 @@ fn stage_tone(stage: &str) -> &'static str {
         "orange"
     } else if stage.contains("复盘") {
         "purple"
-    } else if stage.contains("等待") {
+    } else if stage.contains("等待") || stage.contains("人才库") || stage.contains("暂停") || stage.contains("结束") {
         "gray"
     } else {
         "blue"
     }
 }
 fn stage_progress(stage: &str) -> i64 {
-    if stage.contains("拒绝") || stage.to_lowercase().contains("offer") {
+    if stage.contains("拒绝") || stage.to_lowercase().contains("offer") || stage.contains("人才库") || stage.contains("暂停") || stage.contains("结束") {
         5
     } else if stage.contains("等待") {
         4
     } else if stage.contains("面") || stage.contains("HR") {
         3
-    } else if stage.contains("测评") {
+    } else if stage.contains("测评") || stage.contains("笔试") {
         2
     } else {
         1
@@ -1758,13 +2392,109 @@ fn schedule_tone(value: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_version_8_database_is_upgraded_with_recorded_at() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        Database::configure(&connection).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));",
+        ).unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 7) {
+            let transaction = connection.transaction().unwrap();
+            transaction.execute_batch(sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name) VALUES (?1,?2)",
+                    params![version, name],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        connection.execute_batch(
+            "ALTER TABLE application_events ADD COLUMN updated_at TEXT;
+             UPDATE application_events SET updated_at=created_at WHERE updated_at IS NULL;
+             CREATE TRIGGER application_events_fill_updated_at AFTER INSERT ON application_events
+             WHEN NEW.updated_at IS NULL BEGIN UPDATE application_events SET updated_at=NEW.created_at WHERE id=NEW.id; END;
+             INSERT INTO schema_migrations(version,name) VALUES (8,'008_application_event_times');",
+        ).unwrap();
+        let had_recorded_at: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('application_events') WHERE name='recorded_at')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!had_recorded_at);
+
+        Database::migrate(&mut connection).unwrap();
+        let has_recorded_at: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('application_events') WHERE name='recorded_at')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(has_recorded_at);
+        let db = Database {
+            connection: Mutex::new(connection),
+            path: Mutex::new(PathBuf::from(":memory:")),
+        };
+        let created = db.create_application(input()).unwrap();
+        db.update_application_stage(&created.id, "等待结果")
+            .unwrap();
+        assert_eq!(
+            db.get_application_detail(&created.id)
+                .unwrap()
+                .current_stage,
+            "等待结果"
+        );
+    }
+
+    #[test]
+    fn version_12_repairs_sync_state_for_already_recorded_version_11() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        Database::configure(&connection).unwrap();
+        connection.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));").unwrap();
+        for version in 1..=11 {
+            connection.execute("INSERT INTO schema_migrations(version,name) VALUES (?1,?2)", params![version, format!("legacy_{version}")]).unwrap();
+        }
+        connection.execute_batch(
+            "CREATE TABLE email_messages(id TEXT PRIMARY KEY);
+             CREATE TABLE applications(id TEXT PRIMARY KEY,current_stage TEXT);
+             CREATE TABLE tasks(id TEXT PRIMARY KEY,application_stage TEXT);
+             CREATE TABLE application_events(id TEXT PRIMARY KEY,stage_before TEXT,stage_after TEXT);"
+        ).unwrap();
+        Database::migrate(&mut connection).unwrap();
+        let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_sync_state')", [], |row| row.get(0)).unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn legacy_paused_stage_is_migrated_to_talent_pool() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        let connection = db.connection.lock().unwrap();
+        connection.execute("UPDATE applications SET current_stage='流程暂停' WHERE id=?1", [&created.id]).unwrap();
+        let migration = MIGRATIONS.iter().find(|(version, _, _)| *version == 14).unwrap().2;
+        connection.execute_batch(migration).unwrap();
+        drop(connection);
+        let item = db.list_applications().unwrap().remove(0);
+        assert_eq!(item.stage, "进入人才库");
+        assert_eq!(item.stage_tone, "gray");
+        assert_eq!(item.progress, 5);
+    }
+
     fn input() -> CreateApplicationInput {
         CreateApplicationInput {
             company_name: "测试公司".into(),
+            company_short_name: None,
+            industry: None,
+            company_type: None,
+            website: None,
+            company_notes: None,
             position_title: "后端工程师".into(),
+            department: None,
             location: Some("深圳".into()),
+            recruitment_type: None,
+            job_code: None,
+            source_url: None,
             channel: Some("官网".into()),
             applied_at: Some("2026-07-14".into()),
+            priority: None,
             jd_raw: None,
             resume_profile_id: None,
         }
@@ -1802,6 +2532,84 @@ mod tests {
         assert_eq!(created.company, "测试公司");
         assert_eq!(created.stage, "已投递");
         assert_eq!(db.list_applications().unwrap().len(), 1);
+        let created_event = db
+            .get_application_detail(&created.id)
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|event| event.event_type == "application_created")
+            .unwrap();
+        assert_eq!(created_event.happened_at, "2026-07-14T00:00:00.000Z");
+        assert!(!created_event.updated_at.is_empty());
+    }
+
+    #[test]
+    fn stage_event_business_time_is_editable_without_breaking_sequence() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        db.update_application_stage(&created.id, "等待结果")
+            .unwrap();
+        let event = db
+            .get_application_detail(&created.id)
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|item| item.event_type == "stage_changed")
+            .unwrap();
+
+        let updated = db
+            .update_application_event_time(&event.id, "2026-07-14T01:30:00.000Z")
+            .unwrap();
+        assert_eq!(
+            updated
+                .events
+                .iter()
+                .find(|item| item.id == event.id)
+                .unwrap()
+                .happened_at,
+            "2026-07-14T01:30:00.000Z"
+        );
+        assert!(db
+            .update_application_event_time(&event.id, "2026-07-13T23:59:00.000Z")
+            .is_err());
+        let created_event = updated
+            .events
+            .iter()
+            .find(|item| item.event_type == "application_created")
+            .unwrap();
+        assert!(db
+            .update_application_event_time(&created_event.id, "2026-07-14T02:00:00.000Z")
+            .is_err());
+
+        let calendar = db
+            .get_dashboard(
+                "2026-07-01T00:00:00.000Z",
+                "2026-08-01T00:00:00.000Z",
+                "2026-07-14T00:00:00.000Z",
+                "2026-07-15T00:00:00.000Z",
+            )
+            .unwrap();
+        assert!(calendar.events.iter().any(|item| {
+            item.id == format!("milestone:{}", event.id)
+                && item.scheduled_at == "2026-07-14T01:30:00.000Z"
+        }));
+
+        // Insertion order may differ from business chronology when users backfill events.
+        // A later-inserted but earlier-dated stage must not be treated as the next boundary.
+        let backfilled_id = Uuid::new_v4().to_string();
+        let later_id = Uuid::new_v4().to_string();
+        {
+            let connection = db.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO application_events(id,application_id,event_type,title,source_type,stage_before,stage_after,happened_at) VALUES (?1,?2,'stage_changed','后续节点','manual','等待结果','HR面试','2026-07-20T00:00:00.000Z')",
+                params![later_id, created.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO application_events(id,application_id,event_type,title,source_type,stage_before,stage_after,happened_at) VALUES (?1,?2,'stage_changed','补录节点','manual','已投递','在线测评','2026-07-10T00:00:00.000Z')",
+                params![backfilled_id, created.id],
+            ).unwrap();
+        }
+        assert!(db.update_application_event_time(&later_id, "2026-07-18T00:00:00.000Z").is_ok());
     }
 
     #[test]
@@ -1822,6 +2630,47 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dashboard.summary.interviews, 1);
+    }
+
+    #[test]
+    fn rapid_board_stage_changes_are_coalesced_but_manual_events_are_kept() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        db.update_application_stage(&created.id, "等待结果")
+            .unwrap();
+        let manual = db
+            .create_event(
+                &created.id,
+                CreateEventInput {
+                    title: "人工补记沟通".into(),
+                    content: None,
+                    happened_at: None,
+                },
+            )
+            .unwrap();
+        db.update_application_stage(&created.id, "HR面试").unwrap();
+
+        let detail = db.get_application_detail(&created.id).unwrap();
+        let stage_events: Vec<_> = detail
+            .events
+            .iter()
+            .filter(|event| event.event_type == "stage_changed")
+            .collect();
+        assert_eq!(stage_events.len(), 1);
+        assert_eq!(stage_events[0].stage_before.as_deref(), Some("已投递"));
+        assert_eq!(stage_events[0].stage_after.as_deref(), Some("HR面试"));
+        assert!(detail.events.iter().any(|event| event.id == manual.id));
+
+        db.update_application_stage(&created.id, "已投递").unwrap();
+        let returned = db.get_application_detail(&created.id).unwrap();
+        let reverted_stage = returned
+            .events
+            .iter()
+            .find(|event| event.event_type == "stage_changed")
+            .expect("coalescing should retain an audit record");
+        assert!(reverted_stage.reverted_at.is_some());
+        assert_eq!(returned.current_stage, "已投递");
+        assert!(returned.events.iter().any(|event| event.id == manual.id));
     }
 
     #[test]
@@ -1878,7 +2727,15 @@ mod tests {
         assert_eq!(dashboard.summary.total, 1);
         assert_eq!(dashboard.summary.interviews, 1);
         assert_eq!(dashboard.tasks.len(), 1);
-        assert_eq!(dashboard.events.len(), 2);
+        assert_eq!(dashboard.events.len(), 4);
+        assert_eq!(
+            dashboard
+                .events
+                .iter()
+                .filter(|item| item.kind == "milestone")
+                .count(),
+            2
+        );
         let completed = db.set_task_status(&task.id, "done").unwrap();
         assert_eq!(completed.status, "done");
         assert!(completed.completed_at.is_some());
@@ -2002,7 +2859,7 @@ mod tests {
         assert!(reverted
             .events
             .iter()
-            .any(|event| event.event_type == "event_reverted"));
+            .any(|event| event.id == changed_event.id && event.reverted_at.is_some()));
 
         let task = db
             .create_task(
@@ -2029,6 +2886,16 @@ mod tests {
             .list_due_task_reminders("2026-07-20T01:02:00.000Z")
             .unwrap()
             .is_empty());
+        db.release_task_reminder_delivery(&task.id, "2026-07-20T01:01:00.000Z")
+            .unwrap();
+        assert_eq!(
+            db.list_due_task_reminders("2026-07-20T01:02:00.000Z")
+                .unwrap()
+                .len(),
+            1
+        );
+        db.mark_task_reminder_delivered(&task.id, "2026-07-20T01:02:00.000Z")
+            .unwrap();
 
         let updated = db
             .update_task(
@@ -2084,6 +2951,127 @@ mod tests {
     }
 
     #[test]
+    fn only_archived_applications_can_be_soft_deleted_with_an_event() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        assert!(db.delete_archived_application(&created.id).is_err());
+        assert_eq!(db.list_applications().unwrap().len(), 1);
+
+        db.set_application_archived(&created.id, true).unwrap();
+        db.delete_archived_application(&created.id).unwrap();
+        assert!(db.list_applications().unwrap().is_empty());
+        assert!(db.get_application_detail(&created.id).is_err());
+
+        let connection = db.connection.lock().unwrap();
+        let (deleted, deletion_events): (bool, i64) = connection
+            .query_row(
+                "SELECT a.deleted_at IS NOT NULL,
+                        (SELECT COUNT(*) FROM application_events e WHERE e.application_id=a.id AND e.event_type='application_deleted')
+                 FROM applications a WHERE a.id=?1",
+                [&created.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(deleted);
+        assert_eq!(deletion_events, 1);
+    }
+
+    #[test]
+    fn stage_events_can_be_reverted_out_of_order_and_excel_contains_history() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        db.update_application_stage(&created.id, "等待结果")
+            .unwrap();
+        {
+            let connection = db.connection.lock().unwrap();
+            connection.execute(
+                "UPDATE application_events SET happened_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes'), recorded_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-10 minutes') WHERE application_id=?1 AND event_type='stage_changed'",
+                [&created.id],
+            ).unwrap();
+        }
+        db.update_application_stage(&created.id, "HR面试").unwrap();
+        let detail = db.get_application_detail(&created.id).unwrap();
+        let waiting_event = detail
+            .events
+            .iter()
+            .find(|event| event.stage_after.as_deref() == Some("等待结果"))
+            .unwrap();
+        let interview_event = detail
+            .events
+            .iter()
+            .find(|event| event.stage_after.as_deref() == Some("HR面试"))
+            .unwrap();
+
+        let calendar_before = db
+            .get_dashboard(
+                "2000-01-01T00:00:00.000Z",
+                "2100-01-01T00:00:00.000Z",
+                "2026-07-14T00:00:00.000Z",
+                "2026-07-15T00:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(
+            calendar_before
+                .events
+                .iter()
+                .filter(|item| item.kind == "milestone")
+                .count(),
+            3
+        );
+
+        let after_older_revert = db.revert_application_event(&waiting_event.id).unwrap();
+        assert_eq!(after_older_revert.current_stage, "HR面试");
+        let calendar_after_older_revert = db
+            .get_dashboard(
+                "2000-01-01T00:00:00.000Z",
+                "2100-01-01T00:00:00.000Z",
+                "2026-07-14T00:00:00.000Z",
+                "2026-07-15T00:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(
+            calendar_after_older_revert
+                .events
+                .iter()
+                .filter(|item| item.kind == "milestone")
+                .count(),
+            2
+        );
+        let after_latest_revert = db.revert_application_event(&interview_event.id).unwrap();
+        assert_eq!(after_latest_revert.current_stage, "已投递");
+        let calendar_after_all_reverts = db
+            .get_dashboard(
+                "2000-01-01T00:00:00.000Z",
+                "2100-01-01T00:00:00.000Z",
+                "2026-07-14T00:00:00.000Z",
+                "2026-07-15T00:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(
+            calendar_after_all_reverts
+                .events
+                .iter()
+                .filter(|item| item.kind == "milestone")
+                .count(),
+            1
+        );
+
+        let path = std::env::temp_dir().join(format!("applied-yet-export-{}.xls", Uuid::new_v4()));
+        assert_eq!(
+            db.export_applications_excel(path.to_str().unwrap())
+                .unwrap(),
+            1
+        );
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("投递记录"));
+        assert!(content.contains("流程与状态变更"));
+        assert!(content.contains("事件时间线"));
+        assert!(content.contains("创建投递"));
+        assert!(content.contains("等待结果"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn provider_settings_use_defaults_validate_and_persist() {
         let db = Database::in_memory().unwrap();
         let defaults = db.get_provider_settings().unwrap();
@@ -2121,6 +3109,8 @@ mod tests {
         let saved = db.get_provider_settings().unwrap();
         assert_eq!(saved.ai.model, ai.model);
         assert_eq!(saved.ai.base_url, ai.base_url);
+        assert!(!saved.ai.allow_email);
+        assert!(saved.ai.prompt_before_send);
         assert_eq!(saved.asr.provider, asr.provider);
         assert_eq!(saved.asr.segment_seconds, 600);
 
@@ -2246,7 +3236,38 @@ mod tests {
     }
 
     #[test]
-    fn linked_resume_is_preserved_and_edits_fork_a_new_version() {
+    fn resume_stage_counts_include_historical_reach() {
+        let db = Database::in_memory().unwrap();
+        let resume = db.create_resume_profile(CreateResumeProfileInput {
+            name: "历史阶段简历".into(), file_path: None, file_format: None, parsed_text: None,
+            personal_info: None, education_background: None, internship_experience: None,
+            project_experience: None, professional_skills: None, academic_achievements: None,
+            skill_certificates: None, target_direction: None, notes: None, parent_profile_id: None,
+            is_primary: true,
+        }).unwrap();
+        let mut application_input = input();
+        application_input.resume_profile_id = Some(resume.id.clone());
+        let application = db.create_application(application_input).unwrap();
+        {
+            let connection = db.connection.lock().unwrap();
+            connection.execute("UPDATE applications SET current_stage='已获Offer' WHERE id=?1", [&application.id]).unwrap();
+            connection.execute(
+                "INSERT INTO application_events(id,application_id,event_type,title,source_type,stage_before,stage_after,happened_at) VALUES (?1,?2,'stage_changed','进入测评','manual','已投递','在线测评','2026-07-15T00:00:00Z')",
+                params![Uuid::new_v4().to_string(), application.id],
+            ).unwrap();
+            connection.execute(
+                "INSERT INTO application_events(id,application_id,event_type,title,source_type,stage_before,stage_after,happened_at) VALUES (?1,?2,'stage_changed','进入面试','manual','在线测评','HR面试','2026-07-16T00:00:00Z')",
+                params![Uuid::new_v4().to_string(), application.id],
+            ).unwrap();
+        }
+        let profile = db.get_resume_profile(&resume.id).unwrap();
+        assert_eq!(profile.assessment_count, 1);
+        assert_eq!(profile.interview_count, 1);
+        assert_eq!(profile.offer_count, 1);
+    }
+
+    #[test]
+    fn linked_resume_is_updated_in_place_and_delete_unlinks_applications() {
         let db = Database::in_memory().unwrap();
         let resume = db
             .create_resume_profile(CreateResumeProfileInput {
@@ -2284,7 +3305,7 @@ mod tests {
             "后端简历"
         );
 
-        let fork = db
+        let updated = db
             .update_resume_profile(
                 &resume.id,
                 UpdateResumeProfileInput {
@@ -2301,8 +3322,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_ne!(fork.id, resume.id);
-        assert_eq!(fork.parent_profile_id.as_deref(), Some(resume.id.as_str()));
+        assert_eq!(updated.id, resume.id);
+        assert_eq!(updated.professional_skills, "Rust, SQL");
         assert_eq!(
             db.get_application_detail(&application.id)
                 .unwrap()
@@ -2312,8 +3333,120 @@ mod tests {
         );
 
         db.delete_resume_profile(&resume.id).unwrap();
-        let archived = db.get_resume_profile(&resume.id).unwrap();
-        assert!(archived.archived_at.is_some());
-        assert_eq!(archived.linked_application_count, 1);
+        assert!(db.get_resume_profile(&resume.id).is_err());
+        assert!(db
+            .get_application_detail(&application.id)
+            .unwrap()
+            .resume_profile_id
+            .is_none());
+    }
+
+    #[test]
+    fn editing_a_linked_non_primary_resume_preserves_the_primary_resume() {
+        let db = Database::in_memory().unwrap();
+        let primary = db
+            .create_resume_profile(CreateResumeProfileInput {
+                name: "默认简历".into(),
+                file_path: None,
+                file_format: None,
+                parsed_text: None,
+                personal_info: None,
+                education_background: None,
+                internship_experience: None,
+                project_experience: None,
+                professional_skills: None,
+                academic_achievements: None,
+                skill_certificates: None,
+                target_direction: None,
+                notes: None,
+                parent_profile_id: None,
+                is_primary: true,
+            })
+            .unwrap();
+        let secondary = db
+            .create_resume_profile(CreateResumeProfileInput {
+                name: "专项简历".into(),
+                file_path: None,
+                file_format: None,
+                parsed_text: None,
+                personal_info: None,
+                education_background: None,
+                internship_experience: None,
+                project_experience: None,
+                professional_skills: None,
+                academic_achievements: None,
+                skill_certificates: None,
+                target_direction: None,
+                notes: None,
+                parent_profile_id: None,
+                is_primary: false,
+            })
+            .unwrap();
+        let mut application_input = input();
+        application_input.resume_profile_id = Some(secondary.id.clone());
+        db.create_application(application_input).unwrap();
+
+        let fork = db
+            .update_resume_profile(
+                &secondary.id,
+                UpdateResumeProfileInput {
+                    name: "专项简历 v2".into(),
+                    personal_info: String::new(),
+                    education_background: String::new(),
+                    internship_experience: String::new(),
+                    project_experience: String::new(),
+                    professional_skills: String::new(),
+                    academic_achievements: String::new(),
+                    skill_certificates: String::new(),
+                    target_direction: String::new(),
+                    notes: String::new(),
+                },
+            )
+            .unwrap();
+
+        assert!(db.get_resume_profile(&primary.id).unwrap().is_primary);
+        assert!(!fork.is_primary);
+    }
+
+    #[test]
+    fn ai_context_excludes_a_soft_deleted_resume() {
+        let db = Database::in_memory().unwrap();
+        let resume = db
+            .create_resume_profile(CreateResumeProfileInput {
+                name: "待删除简历".into(),
+                file_path: None,
+                file_format: None,
+                parsed_text: None,
+                personal_info: Some("敏感资料".into()),
+                education_background: None,
+                internship_experience: None,
+                project_experience: None,
+                professional_skills: None,
+                academic_achievements: None,
+                skill_certificates: None,
+                target_direction: None,
+                notes: None,
+                parent_profile_id: None,
+                is_primary: false,
+            })
+            .unwrap();
+        let mut application_input = input();
+        application_input.resume_profile_id = Some(resume.id.clone());
+        let application = db.create_application(application_input).unwrap();
+        {
+            let connection = db.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE resume_profiles SET deleted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+                    [&resume.id],
+                )
+                .unwrap();
+        }
+
+        assert!(db
+            .get_ai_application_context(&application.id)
+            .unwrap()
+            .resume
+            .is_none());
     }
 }
