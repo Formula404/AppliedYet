@@ -9,7 +9,11 @@ use uuid::Uuid;
 
 mod migrations;
 mod email;
+mod interviews;
 pub mod models;
+pub use interviews::{
+    CreateInterviewQuestion, InterviewQuestionReview, InterviewSessionRecord, QuestionBankItem,
+};
 pub use email::{EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult};
 use migrations::MIGRATIONS;
 pub use models::{
@@ -165,6 +169,20 @@ pub struct ApplicationTask {
     pub source_type: String,
     pub completed_at: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterviewExperienceSource {
+    pub id: String,
+    pub application_id: String,
+    pub source: String,
+    pub url: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub questions: Vec<String>,
+    pub error_message: Option<String>,
+    pub imported_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1619,6 +1637,170 @@ impl Database {
             .ok_or_else(|| "投递不存在".to_string())
     }
 
+    pub fn list_interview_experience_sources(
+        &self,
+        application_id: Option<&str>,
+    ) -> Result<Vec<InterviewExperienceSource>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, application_id, source_type, url, title, status,
+                        questions_json, error_message, created_at
+                 FROM interview_experience_sources
+                 WHERE (?1 IS NULL OR application_id = ?1)
+                 ORDER BY created_at DESC, rowid DESC",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([application_id], experience_source_row)
+            .map_err(db_error)?;
+        rows.map(|row| row.map_err(db_error).and_then(experience_source_from_values))
+            .collect()
+    }
+
+    pub fn get_interview_experience_source(
+        &self,
+        id: &str,
+    ) -> Result<InterviewExperienceSource, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        connection
+            .query_row(
+                "SELECT id, application_id, source_type, url, title, status,
+                        questions_json, error_message, created_at
+                 FROM interview_experience_sources WHERE id = ?1",
+                [id],
+                experience_source_row,
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "面经来源不存在".to_string())
+            .and_then(experience_source_from_values)
+    }
+
+    pub fn create_interview_experience_link(
+        &self,
+        application_id: &str,
+        url: &str,
+        title: &str,
+    ) -> Result<InterviewExperienceSource, String> {
+        let id = Uuid::new_v4().to_string();
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        connection
+            .execute(
+                "INSERT INTO interview_experience_sources
+                    (id, application_id, source_type, url, title, status)
+                 VALUES (?1, ?2, 'link', ?3, ?4, '待分析')",
+                params![id, application_id, url, title],
+            )
+            .map_err(db_error)?;
+        drop(connection);
+        self.get_interview_experience_source(&id)
+    }
+
+    pub fn create_manual_interview_experience(
+        &self,
+        application_id: &str,
+        title: &str,
+        questions: &[String],
+    ) -> Result<InterviewExperienceSource, String> {
+        let id = Uuid::new_v4().to_string();
+        let questions_json = serde_json::to_string(questions).map_err(|error| error.to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        connection
+            .execute(
+                "INSERT INTO interview_experience_sources
+                    (id, application_id, source_type, title, status, questions_json)
+                 VALUES (?1, ?2, 'manual', ?3, '已提取', ?4)",
+                params![id, application_id, title, questions_json],
+            )
+            .map_err(db_error)?;
+        drop(connection);
+        self.get_interview_experience_source(&id)
+    }
+
+    pub fn update_interview_experience_analysis(
+        &self,
+        id: &str,
+        title: Option<&str>,
+        questions: &[String],
+        error_message: Option<&str>,
+    ) -> Result<InterviewExperienceSource, String> {
+        let questions_json = serde_json::to_string(questions).map_err(|error| error.to_string())?;
+        let status = if error_message.is_some() { "分析失败" } else { "已提取" };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE interview_experience_sources
+                 SET title = COALESCE(?2, title), status = ?3, questions_json = ?4,
+                     error_message = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1 AND source_type = 'link'",
+                params![id, title, status, questions_json, error_message],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("待分析的网页面经不存在".into());
+        }
+        drop(connection);
+        self.get_interview_experience_source(id)
+    }
+
+    pub fn delete_interview_experience_source(&self, id: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let changed = connection
+            .execute("DELETE FROM interview_experience_sources WHERE id = ?1", [id])
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("面经来源不存在".into());
+        }
+        Ok(())
+    }
+
+    pub fn update_interview_experience_questions(
+        &self,
+        id: &str,
+        questions: &[String],
+    ) -> Result<InterviewExperienceSource, String> {
+        let questions_json = serde_json::to_string(questions).map_err(|error| error.to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE interview_experience_sources
+                 SET questions_json = ?2,
+                     status = CASE WHEN ?3 > 0 THEN '已提取' ELSE status END,
+                     error_message = CASE WHEN ?3 > 0 THEN NULL ELSE error_message END,
+                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+                params![id, questions_json, questions.len()],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("面经来源不存在".into());
+        }
+        drop(connection);
+        self.get_interview_experience_source(id)
+    }
+
     pub fn start_ai_call(
         &self,
         application_id: Option<&str>,
@@ -2320,6 +2502,49 @@ fn required(value: String, field: &str) -> Result<String, String> {
         Ok(value)
     }
 }
+
+type ExperienceSourceRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
+fn experience_source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ExperienceSourceRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+    ))
+}
+
+fn experience_source_from_values(
+    row: ExperienceSourceRow,
+) -> Result<InterviewExperienceSource, String> {
+    Ok(InterviewExperienceSource {
+        id: row.0,
+        application_id: row.1,
+        source: row.2,
+        url: row.3,
+        title: row.4,
+        status: row.5,
+        questions: serde_json::from_str(&row.6).map_err(json_error)?,
+        error_message: row.7,
+        imported_at: row.8,
+    })
+}
+
 fn db_error(error: rusqlite::Error) -> String {
     format!("数据库操作失败: {error}")
 }
@@ -2498,6 +2723,121 @@ mod tests {
             jd_raw: None,
             resume_profile_id: None,
         }
+    }
+
+    #[test]
+    fn interview_experience_sources_are_persisted_updated_and_deleted() {
+        let db = Database::in_memory().unwrap();
+        let application = db.create_application(input()).unwrap();
+        let link = db
+            .create_interview_experience_link(
+                &application.id,
+                "https://example.com/interview",
+                "待分析帖子",
+            )
+            .unwrap();
+        assert_eq!(link.status, "待分析");
+
+        let analyzed = db
+            .update_interview_experience_analysis(
+                &link.id,
+                Some("后端一面"),
+                &["如何保证消息幂等？".into()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(analyzed.title, "后端一面");
+        assert_eq!(analyzed.questions, vec!["如何保证消息幂等？"]);
+
+        let manual = db
+            .create_manual_interview_experience(
+                &application.id,
+                "朋友分享",
+                &["介绍一下项目。".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            db.list_interview_experience_sources(Some(&application.id))
+                .unwrap()
+                .len(),
+            2
+        );
+        db.delete_interview_experience_source(&manual.id).unwrap();
+        assert_eq!(
+            db.list_interview_experience_sources(Some(&application.id))
+                .unwrap()
+                .len(),
+            1
+        );
+        let edited = db
+            .update_interview_experience_questions(
+                &link.id,
+                &["编辑后的问题？".into(), "另一道问题？".into()],
+            )
+            .unwrap();
+        assert_eq!(edited.questions.len(), 2);
+        assert_eq!(edited.questions[0], "编辑后的问题？");
+    }
+
+    #[test]
+    fn interview_sessions_resume_review_and_feed_question_bank() {
+        let db = Database::in_memory().unwrap();
+        let application = db.create_application(input()).unwrap();
+        let session = db
+            .create_interview_session(
+                &application.id,
+                "模拟面试",
+                "技术综合模拟",
+                "进行中",
+                &[
+                    CreateInterviewQuestion {
+                        prompt: "如何保证消息幂等？".into(),
+                        source: "面经".into(),
+                        answer: String::new(),
+                    },
+                    CreateInterviewQuestion {
+                        prompt: "介绍一下你的项目。".into(),
+                        source: "AI 简历题".into(),
+                        answer: String::new(),
+                    },
+                ],
+            )
+            .unwrap();
+        db.update_interview_session_answer(
+            &session.id,
+            &session.questions[0].id,
+            "使用业务唯一键和数据库唯一约束。",
+        )
+        .unwrap();
+        db.update_interview_session_progress(&session.id, 1).unwrap();
+        let resumed = db.get_interview_session(&session.id).unwrap();
+        assert_eq!(resumed.current_question_index, 1);
+        assert!(resumed.questions[0].answer.contains("唯一键"));
+
+        let completed = db.complete_interview_session(&session.id).unwrap();
+        assert_eq!(completed.status, "待复盘");
+        let reviewed = db
+            .save_interview_session_review(
+                &session.id,
+                "幂等回答方向正确，项目题需要补充。",
+                &[
+                    InterviewQuestionReview {
+                        question_id: session.questions[0].id.clone(),
+                        score: 82,
+                        evaluation: "方向正确，建议补充并发冲突处理。".into(),
+                    },
+                    InterviewQuestionReview {
+                        question_id: session.questions[1].id.clone(),
+                        score: 20,
+                        evaluation: "本题未作答。".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(reviewed.status, "复盘完成");
+        let bank = db.list_question_bank_items().unwrap();
+        assert_eq!(bank.len(), 2);
+        assert!(bank.iter().any(|item| item.mastery == "熟悉"));
     }
 
     fn detail_input() -> UpdateApplicationDetailInput {

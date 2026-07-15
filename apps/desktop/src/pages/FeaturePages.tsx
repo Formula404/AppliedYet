@@ -4,6 +4,7 @@ import { Badge, Card, CardHeader, PageHeader } from "../components/ui";
 import PreparationPage from "./interview/PreparationPage";
 import MockInterviewPage from "./interview/MockInterviewPage";
 import ReviewsPage from "./interview/ReviewsPage";
+import QuestionBankPage from "./interview/QuestionBankPage";
 import SettingsPage from "./SettingsPage";
 import { getAnalytics, type AnalyticsData } from "../services/dashboard";
 import { hasLocalDatabase } from "../services/applications";
@@ -22,10 +23,8 @@ const meta: Record<Kind, { title: string; description: string }> = {
 
 export default function FeaturePages({ kind }: { kind: Kind }) {
   const page = meta[kind];
-  return <div className="page page-enter"><PageHeader title={page.title} description={page.description} action={kind==="questions"||kind==="offers"?<button className="button button--primary"><Plus size={16}/>新建内容</button>:undefined}/>{kind==="preparation"&&<PreparationPage/>}{kind==="mock"&&<MockInterviewPage/>}{kind==="reviews"&&<ReviewsPage/>}{kind==="questions"&&<Questions/>}{kind==="offers"&&<Offers/>}{kind==="analytics"&&<Analytics/>}{kind==="settings"&&<SettingsPage/>}</div>;
+  return <div className="page page-enter"><PageHeader title={page.title} description={page.description} action={kind==="offers"?<button className="button button--primary"><Plus size={16}/>新建内容</button>:undefined}/>{kind==="preparation"&&<PreparationPage/>}{kind==="mock"&&<MockInterviewPage/>}{kind==="reviews"&&<ReviewsPage/>}{kind==="questions"&&<QuestionBankPage/>}{kind==="offers"&&<Offers/>}{kind==="analytics"&&<Analytics/>}{kind==="settings"&&<SettingsPage/>}</div>;
 }
-
-function Questions(){const rows=[["如何保证分布式事务的一致性？","专业知识","5 次","熟悉"],["讲一个解决复杂问题的经历","行为面试","8 次","掌握"],["为什么选择我们公司？","岗位动机","6 次","待加强"],["项目中你最大的个人贡献是什么？","项目深挖","7 次","练习中"],["如何处理团队中的意见冲突？","行为面试","4 次","掌握"]];return <><div className="knowledge-tabs"><button className="active">问题库 <b>126</b></button><button>故事库 <b>18</b></button><button>薄弱项 <b>7</b></button></div><Card className="table-card"><table><thead><tr><th>问题</th><th>类型</th><th>出现次数</th><th>掌握程度</th><th>最近出现</th></tr></thead><tbody>{rows.map((r,i)=><tr key={r[0]}><td><strong>{r[0]}</strong><small>来源：{i%2?"真实面试":"面经 · 模拟面试"}</small></td><td><Badge tone={i%2?"purple":"blue"}>{r[1]}</Badge></td><td>{r[2]}</td><td><span className="mastery"><i style={{width:`${45+i*11}%`}}/></span>{r[3]}</td><td>{i+1} 天前</td></tr>)}</tbody></table></Card></>}
 
 function Offers(){return <><div className="offer-summary"><Card><span className="stat-icon teal"><CircleDollarSign/></span><span><small>已收到 Offer</small><strong>3</strong></span></Card><Card><span className="stat-icon orange"><Clock3/></span><span><small>即将截止</small><strong>1</strong></span></Card><Card><span className="stat-icon blue"><Star/></span><span><small>当前首选</small><strong>蚂蚁集团</strong></span></Card></div><Card className="offer-compare"><CardHeader title="Offer 对比" action="调整权重"/><table><thead><tr><th>比较维度</th><th>权重</th><th>蚂蚁集团</th><th>腾讯科技</th><th>字节跳动</th></tr></thead><tbody>{[["综合得分","—","88","84","82"],["岗位匹配","25%","9.2","8.6","8.4"],["成长空间","20%","9.0","8.5","9.1"],["工作强度","15%","7.2","7.8","6.5"],["城市偏好","15%","9.0","8.0","7.5"],["薪资福利","25%","8.6","8.8","9.0"]].map((r,i)=><tr key={r[0]} className={i===0?"score-row":""}>{r.map((v,j)=><td key={j}>{v}</td>)}</tr>)}</tbody></table><p className="data-disclaimer">评分只根据你设置的权重汇总，最终选择由你决定。</p></Card></>}
 

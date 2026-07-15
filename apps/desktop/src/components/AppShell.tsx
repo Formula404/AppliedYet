@@ -204,7 +204,6 @@ export default function AppShell() {
       </header>
       <main key={location.pathname}><Outlet /></main>
     </div>
-    <button className="floating-add" onClick={() => navigate("/applications?new=1")} title="新增投递（Ctrl + N）"><Plus size={22}/></button>
     {(toast || globalToast) && (() => { const kind = globalToast?.kind ?? toastKind; return <div className={`toast toast--${kind}`}>{kind === "error" ? <AlertCircle size={17}/> : kind === "info" ? <Info size={17}/> : <Check size={17}/>} {globalToast?.message ?? toast}<button onClick={() => { setToast(""); setGlobalToast(null); }}><X size={15}/></button></div>; })()}
     {searchOpen && <div className="modal-backdrop" onMouseDown={() => setSearchOpen(false)}><div className="command" onMouseDown={(e)=>e.stopPropagation()}><div className="command-input"><Search size={20}/><input autoFocus value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索公司、岗位、邮件、面试记录…"/><kbd>ESC</kbd></div><div className="command-body">{searchContent}</div></div></div>}
   </div>;

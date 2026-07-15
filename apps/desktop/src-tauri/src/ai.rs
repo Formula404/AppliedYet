@@ -1,6 +1,9 @@
 use crate::{
     credentials,
-    db::{AiApplicationContext, AiProviderSettings, Database, StoredInterviewPreparation},
+    db::{
+        AiApplicationContext, AiProviderSettings, CreateInterviewQuestion, Database,
+        InterviewQuestionReview, InterviewSessionRecord, StoredInterviewPreparation,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,6 +58,26 @@ pub struct PredictedQuestion {
 #[serde(rename_all = "camelCase")]
 struct ResumeQuestionSet {
     questions: Vec<PredictedQuestion>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InterviewReviewSet {
+    summary: String,
+    reviews: Vec<InterviewQuestionReview>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptInterview {
+    round: String,
+    questions: Vec<TranscriptQuestion>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct TranscriptQuestion {
+    question: String,
+    answer: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -289,6 +312,260 @@ pub async fn generate_resume_questions(
         Some(&last_error),
     )?;
     Err(last_error)
+}
+
+pub async fn generate_interview_review(
+    database: &Database,
+    session_id: &str,
+) -> Result<InterviewSessionRecord, String> {
+    let session = database.get_interview_session(session_id)?;
+    if session.status == "进行中" {
+        return Err("请先完成本场面试，再生成复盘".into());
+    }
+    if session.questions.is_empty() {
+        return Err("本场面试没有可复盘的问题".into());
+    }
+    let settings = database.get_provider_settings()?.ai;
+    let api_key = credentials::get_secret("ai_api_key")?;
+    let sources = json!([{ "type": "interview_session", "sessionId": session_id, "questionCount": session.questions.len() }]);
+    let call_id = database.start_ai_call(
+        Some(&session.application_id),
+        "interview_review",
+        &settings.provider,
+        &settings.model,
+        &sources.to_string(),
+    )?;
+    let started = Instant::now();
+    let user = format!(
+        "请对以下真实问答记录逐题评分并给出具体改进建议。未作答题应给低分并明确指出未作答；不得编造候选人没有说过的内容。\n{}",
+        serde_json::to_string_pretty(&session).map_err(|error| error.to_string())?
+    );
+    let schema = interview_review_schema(&session);
+    let mut attempts = 0_i64;
+    let mut last_error = "AI 未返回有效复盘".to_string();
+    for model in candidate_models(&settings) {
+        for repair in 0..2 {
+            attempts += 1;
+            let schema_fallback = repair > 0 && schema_transport_is_unsupported(&last_error);
+            let note = if repair == 0 {
+                String::new()
+            } else {
+                "\n上一次输出无效。必须为输入中的每个 questionId 返回且只返回一条评价，分数为 0 到 100。".into()
+            };
+            match request_text(
+                &settings,
+                &api_key,
+                &model,
+                "你是严谨的面试复盘教练。评价必须基于候选人的实际回答，关注准确性、完整性、结构、证据和表达；只输出 JSON。",
+                &format!("{user}{note}"),
+                (!schema_fallback).then(|| schema.clone()),
+            )
+            .await
+            {
+                Ok(text) => match serde_json::from_str::<InterviewReviewSet>(strip_json_fence(&text)) {
+                    Ok(result) if valid_interview_review(&session, &result) => {
+                        let response = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+                        let reviewed = database.save_interview_session_review(
+                            session_id,
+                            &result.summary,
+                            &result.reviews,
+                        )?;
+                        database.finish_ai_call(
+                            &call_id,
+                            "succeeded",
+                            attempts,
+                            elapsed_ms(started),
+                            Some(&response),
+                            None,
+                        )?;
+                        return Ok(reviewed);
+                    }
+                    Ok(_) => last_error = "复盘结果的问题编号、数量或分数无效".into(),
+                    Err(error) => last_error = format!("复盘结果解析失败: {error}"),
+                },
+                Err(error) => last_error = error,
+            }
+        }
+    }
+    database.finish_ai_call(
+        &call_id,
+        "failed",
+        attempts,
+        elapsed_ms(started),
+        None,
+        Some(&last_error),
+    )?;
+    Err(last_error)
+}
+
+pub async fn import_interview_transcript(
+    database: &Database,
+    application_id: &str,
+    transcript: &str,
+) -> Result<InterviewSessionRecord, String> {
+    let transcript = transcript.trim();
+    if transcript.is_empty() {
+        return Err("复盘材料中没有可解析的文字".into());
+    }
+    if transcript.chars().count() > 60_000 {
+        return Err("复盘材料过长，请精简到 6 万字以内".into());
+    }
+    let context = database.get_ai_application_context(application_id)?;
+    let settings = database.get_provider_settings()?.ai;
+    let api_key = credentials::get_secret("ai_api_key")?;
+    let sources =
+        json!([{ "type": "interview_transcript", "characters": transcript.chars().count() }]);
+    let call_id = database.start_ai_call(
+        Some(application_id),
+        "interview_transcript_parse",
+        &settings.provider,
+        &settings.model,
+        &sources.to_string(),
+    )?;
+    let started = Instant::now();
+    let user = format!(
+        "岗位：{} · {}\n请从以下面试记录中按发生顺序还原面试官问题和候选人回答。不要把旁白、时间戳、说话人标签当成问题；无法确定的回答留空。\n\n{}",
+        context.company_name, context.position_title, transcript
+    );
+    let schema = transcript_schema();
+    let mut attempts = 0_i64;
+    let mut last_error = "AI 未能从材料中识别问答".to_string();
+    for model in candidate_models(&settings) {
+        for repair in 0..2 {
+            attempts += 1;
+            let schema_fallback = repair > 0 && schema_transport_is_unsupported(&last_error);
+            match request_text(
+                &settings,
+                &api_key,
+                &model,
+                "你是面试记录整理助手。只能忠实整理输入材料，不得补写没有出现的问题或答案；只输出 JSON。",
+                &user,
+                (!schema_fallback).then(|| schema.clone()),
+            )
+            .await
+            {
+                Ok(text) => match serde_json::from_str::<TranscriptInterview>(strip_json_fence(&text)) {
+                    Ok(result)
+                        if !result.questions.is_empty()
+                            && result.questions.len() <= 50
+                            && result.questions.iter().all(|item| !item.question.trim().is_empty()) =>
+                    {
+                        let questions: Vec<CreateInterviewQuestion> = result
+                            .questions
+                            .into_iter()
+                            .map(|item| CreateInterviewQuestion {
+                                prompt: item.question,
+                                source: "真实面试".into(),
+                                answer: item.answer,
+                            })
+                            .collect();
+                        let session = database.create_interview_session(
+                            application_id,
+                            "真实面试",
+                            result.round.trim().if_empty("真实面试"),
+                            "待复盘",
+                            &questions,
+                        )?;
+                        database.finish_ai_call(
+                            &call_id,
+                            "succeeded",
+                            attempts,
+                            elapsed_ms(started),
+                            Some(&serde_json::to_string(&session).map_err(|error| error.to_string())?),
+                            None,
+                        )?;
+                        return Ok(session);
+                    }
+                    Ok(_) => last_error = "材料中没有识别到有效问答".into(),
+                    Err(error) => last_error = format!("问答结构解析失败: {error}"),
+                },
+                Err(error) => last_error = error,
+            }
+        }
+    }
+    database.finish_ai_call(
+        &call_id,
+        "failed",
+        attempts,
+        elapsed_ms(started),
+        None,
+        Some(&last_error),
+    )?;
+    Err(last_error)
+}
+
+trait IfEmpty {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
+}
+
+impl IfEmpty for str {
+    fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str {
+        if self.is_empty() {
+            fallback
+        } else {
+            self
+        }
+    }
+}
+
+fn valid_interview_review(session: &InterviewSessionRecord, result: &InterviewReviewSet) -> bool {
+    if result.summary.trim().is_empty() || result.reviews.len() != session.questions.len() {
+        return false;
+    }
+    let expected: std::collections::HashSet<&str> = session
+        .questions
+        .iter()
+        .map(|question| question.id.as_str())
+        .collect();
+    let actual: std::collections::HashSet<&str> = result
+        .reviews
+        .iter()
+        .map(|review| review.question_id.as_str())
+        .collect();
+    expected == actual
+        && result
+            .reviews
+            .iter()
+            .all(|review| (0..=100).contains(&review.score) && !review.evaluation.trim().is_empty())
+}
+
+fn interview_review_schema(session: &InterviewSessionRecord) -> Value {
+    let ids: Vec<&str> = session
+        .questions
+        .iter()
+        .map(|question| question.id.as_str())
+        .collect();
+    json!({
+        "type":"object","additionalProperties":false,
+        "properties":{
+            "summary":{"type":"string"},
+            "reviews":{"type":"array","minItems":ids.len(),"maxItems":ids.len(),"items":{
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "questionId":{"type":"string","enum":ids},
+                    "score":{"type":"integer","minimum":0,"maximum":100},
+                    "evaluation":{"type":"string"}
+                },
+                "required":["questionId","score","evaluation"]
+            }}
+        },
+        "required":["summary","reviews"]
+    })
+}
+
+fn transcript_schema() -> Value {
+    json!({
+        "type":"object","additionalProperties":false,
+        "properties":{
+            "round":{"type":"string"},
+            "questions":{"type":"array","minItems":1,"maxItems":50,"items":{
+                "type":"object","additionalProperties":false,
+                "properties":{"question":{"type":"string"},"answer":{"type":"string"}},
+                "required":["question","answer"]
+            }}
+        },
+        "required":["round","questions"]
+    })
 }
 
 fn resume_questions_schema(count: i64) -> Value {

@@ -7,6 +7,7 @@ mod credentials;
 mod database;
 use database as db;
 mod document;
+mod experience;
 mod resume;
 mod resume_ai;
 
@@ -62,6 +63,23 @@ pub fn run() {
             commands::email::confirm_email_match,
             commands::email::ignore_email,
             commands::email::rematch_email,
+            commands::experience::list_interview_experience_sources,
+            commands::experience::import_interview_experience_link,
+            commands::experience::create_manual_interview_experience,
+            commands::experience::analyze_interview_experience_link,
+            commands::experience::delete_interview_experience_source,
+            commands::experience::update_interview_experience_questions,
+            commands::interviews::list_interview_sessions,
+            commands::interviews::create_mock_interview_session,
+            commands::interviews::update_interview_session_answer,
+            commands::interviews::update_interview_session_progress,
+            commands::interviews::complete_interview_session,
+            commands::interviews::generate_interview_review,
+            commands::interviews::import_interview_transcript,
+            commands::interviews::delete_interview_session,
+            commands::interviews::list_question_bank_items,
+            commands::interviews::save_question_bank_item,
+            commands::interviews::delete_question_bank_item,
             commands::ai::test_ai_provider,
             commands::ai::generate_interview_preparation,
             commands::ai::get_latest_interview_preparation,

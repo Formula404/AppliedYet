@@ -10,43 +10,38 @@ import {
   updateApplicationStage as persistApplicationStage,
   type CreateApplicationInput,
 } from "../services/applications";
-
-export interface ExperienceLink {
-  id: string;
-  applicationId: string;
-  source: "link" | "manual";
-  url?: string;
-  title: string;
-  importedAt: string;
-  status: "待分析" | "已提取" | "分析失败";
-  questions: string[];
-}
-
-export interface InterviewQuestion {
-  id: string;
-  prompt: string;
-  source: "面经" | "AI 简历题" | "真实面试";
-  answer: string;
-  score?: number;
-  evaluation?: string;
-}
-
-export interface InterviewSession {
-  id: string;
-  applicationId: string;
-  type: "模拟面试" | "真实面试";
-  round: string;
-  createdAt: string;
-  duration: string;
-  status: "进行中" | "待复盘" | "复盘完成";
-  questions: InterviewQuestion[];
-}
+import {
+  analyzeInterviewExperienceLink,
+  createManualInterviewExperience,
+  deleteInterviewExperienceSource,
+  importInterviewExperienceLink,
+  listInterviewExperienceSources,
+  updateInterviewExperienceQuestions,
+  type ExperienceLink,
+} from "../services/experience";
+import {
+  completeInterviewSession,
+  createMockInterviewSession,
+  deleteInterviewSession,
+  generateInterviewReview,
+  importInterviewTranscript,
+  listInterviewSessions,
+  updateInterviewSessionAnswer,
+  updateInterviewSessionProgress,
+  type CreateInterviewQuestion,
+  type InterviewQuestion,
+  type InterviewSession,
+} from "../services/interviews";
+export type { ExperienceLink } from "../services/experience";
+export type { InterviewQuestion, InterviewSession } from "../services/interviews";
 
 interface CreateMockOptions {
   applicationId: string;
   questionCount: number;
   useExperience: boolean;
   useAi: boolean;
+  useBank?: boolean;
+  bankQuestions?: string[];
   resumeQuestions?: string[];
 }
 
@@ -64,12 +59,18 @@ interface InterviewFlowValue {
   refreshApplications: () => Promise<void>;
   archiveApplication: (id: string, archived: boolean) => Promise<void>;
   deleteApplication: (id: string) => Promise<void>;
-  importExperienceLink: (applicationId: string, url: string) => string;
-  addManualExperience: (applicationId: string, title: string, questions: string[]) => string;
-  analyzeExperienceLink: (id: string) => void;
-  createMockSession: (options: CreateMockOptions) => string;
-  updateSessionAnswer: (sessionId: string, questionId: string, answer: string) => void;
-  completeSession: (id: string) => void;
+  importExperienceLink: (applicationId: string, url: string) => Promise<ExperienceLink>;
+  addManualExperience: (applicationId: string, title: string, questions: string[]) => Promise<ExperienceLink>;
+  analyzeExperienceLink: (id: string) => Promise<ExperienceLink>;
+  deleteExperienceSource: (id: string) => Promise<void>;
+  updateExperienceQuestions: (id: string, questions: string[]) => Promise<ExperienceLink>;
+  createMockSession: (options: CreateMockOptions) => Promise<InterviewSession>;
+  updateSessionAnswer: (sessionId: string, questionId: string, answer: string) => Promise<void>;
+  updateSessionProgress: (id: string, questionIndex: number) => Promise<void>;
+  completeSession: (id: string) => Promise<InterviewSession>;
+  reviewSession: (id: string) => Promise<InterviewSession>;
+  importTranscript: (applicationId: string, transcript: string) => Promise<InterviewSession>;
+  deleteSession: (id: string) => Promise<void>;
 }
 
 const InterviewFlowContext = createContext<InterviewFlowValue | null>(null);
@@ -103,14 +104,15 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
   const [applicationsLoading, setApplicationsLoading] = useState(hasLocalDatabase);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const stageUpdateQueues = useRef(new Map<string, Promise<void>>());
+  const sessionAnswerQueues = useRef(new Map<string, Promise<void>>());
   const [selectedApplicationId, setSelectedApplicationId] = useState("ant");
-  const [experienceLinks, setExperienceLinks] = useState<ExperienceLink[]>([
+  const [experienceLinks, setExperienceLinks] = useState<ExperienceLink[]>(() => hasLocalDatabase ? [] : [
     { id: "link-ant-1", applicationId: "ant", source: "link", url: "https://www.nowcoder.com/discuss/ant-backend", title: "蚂蚁后端一面经验整理", importedAt: "今天 10:24", status: "已提取", questions: experienceQuestions },
     { id: "link-tencent-1", applicationId: "tencent", source: "link", url: "https://www.nowcoder.com/discuss/tencent-server", title: "腾讯后台开发二面面经", importedAt: "昨天", status: "已提取", questions: experienceQuestions.slice(1) },
   ]);
-  const [sessions, setSessions] = useState<InterviewSession[]>([
+  const [sessions, setSessions] = useState<InterviewSession[]>(() => hasLocalDatabase ? [] : [
     {
-      id: "real-ant-1", applicationId: "ant", type: "真实面试", round: "技术一面", createdAt: "今天 09:30", duration: "48 分钟", status: "复盘完成",
+      id: "real-ant-1", applicationId: "ant", type: "真实面试", round: "技术一面", createdAt: "今天 09:30", duration: "48 分钟", status: "复盘完成", currentQuestionIndex: 0,
       questions: [
         reviewedQuestion("real-ant-q1", "介绍一下订单系统重构项目。", "我负责拆分订单服务，并通过异步化降低主链路耗时。", 82, "结构清晰，也说明了个人职责；如果补充重构前后的延迟和吞吐量，结论会更有说服力。"),
         reviewedQuestion("real-ant-q2", "如何处理消息重复消费？", "通过业务唯一键和状态机实现幂等，同时记录消费日志。", 88, "方案完整，覆盖了业务幂等和可追溯性。可以进一步说明数据库唯一约束与并发冲突处理。"),
@@ -118,7 +120,7 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       ],
     },
     {
-      id: "mock-tencent-1", applicationId: "tencent", type: "模拟面试", round: "技术综合模拟", createdAt: "昨天 20:16", duration: "26 分钟", status: "待复盘",
+      id: "mock-tencent-1", applicationId: "tencent", type: "模拟面试", round: "技术综合模拟", createdAt: "昨天 20:16", duration: "26 分钟", status: "待复盘", currentQuestionIndex: 0,
       questions: [
         { id: "mock-t-q1", prompt: experienceQuestions[1], source: "面经", answer: "我会优先选择本地事务消息或事务发件箱模式。", score: 72, evaluation: "方向正确，但需要补充失败重试、幂等和对账闭环。" },
         { id: "mock-t-q2", prompt: resumeQuestions[0], source: "AI 简历题", answer: "原系统模块耦合较高，发布和扩容都比较困难。", score: 68, evaluation: "识别了架构问题，但回答偏抽象，应结合具体故障或指标说明为什么必须重构。" },
@@ -147,6 +149,12 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!hasLocalDatabase) return;
     refreshApplications().catch(() => undefined);
+    listInterviewExperienceSources()
+      .then(setExperienceLinks)
+      .catch((error) => setApplicationsError(String(error)));
+    listInterviewSessions()
+      .then(setSessions)
+      .catch((error) => setApplicationsError(String(error)));
   }, [refreshApplications]);
 
   const eligibleApplications = useMemo(() => applications.filter(isInterviewEligible), [applications]);
@@ -236,56 +244,133 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         throw error;
       }
     },
-    importExperienceLink: (applicationId, url) => {
+    importExperienceLink: async (applicationId, url) => {
+      if (hasLocalDatabase) {
+        const created = await importInterviewExperienceLink(applicationId, url);
+        setExperienceLinks((current) => [created, ...current]);
+        return created;
+      }
       const id = makeId("link");
       let title = "待分析的网页面经";
       try { title = `${new URL(url).hostname} · 面经帖子`; } catch { /* UI 已校验 URL */ }
-      setExperienceLinks((current) => [{ id, applicationId, source: "link", url, title, importedAt: "刚刚", status: "待分析", questions: [] }, ...current]);
-      return id;
+      const created: ExperienceLink = { id, applicationId, source: "link", url, title, importedAt: "刚刚", status: "待分析", questions: [] };
+      setExperienceLinks((current) => [created, ...current]);
+      return created;
     },
-    addManualExperience: (applicationId, title, questions) => {
+    addManualExperience: async (applicationId, title, questions) => {
+      if (hasLocalDatabase) {
+        const created = await createManualInterviewExperience(applicationId, title, questions);
+        setExperienceLinks((current) => [created, ...current]);
+        return created;
+      }
       const id = makeId("manual");
-      setExperienceLinks((current) => [{ id, applicationId, source: "manual", title: title || "人工整理面经", importedAt: "刚刚", status: "已提取", questions }, ...current]);
-      return id;
+      const created: ExperienceLink = { id, applicationId, source: "manual", title: title || "人工整理面经", importedAt: "刚刚", status: "已提取", questions };
+      setExperienceLinks((current) => [created, ...current]);
+      return created;
     },
-    analyzeExperienceLink: (id) => {
-      setExperienceLinks((current) => current.map((item) => item.id === id ? { ...item, status: "已提取", questions: experienceQuestions } : item));
+    analyzeExperienceLink: async (id) => {
+      const analyzed = hasLocalDatabase
+        ? await analyzeInterviewExperienceLink(id)
+        : { ...experienceLinks.find((item) => item.id === id)!, status: "已提取" as const, questions: experienceQuestions };
+      setExperienceLinks((current) => current.map((item) => item.id === id ? analyzed : item));
+      return analyzed;
     },
-    createMockSession: ({ applicationId, questionCount, useExperience, useAi, resumeQuestions: generatedResumeQuestions }) => {
+    deleteExperienceSource: async (id) => {
+      if (hasLocalDatabase) await deleteInterviewExperienceSource(id);
+      setExperienceLinks((current) => current.filter((item) => item.id !== id));
+    },
+    updateExperienceQuestions: async (id, questions) => {
+      const updated = hasLocalDatabase
+        ? await updateInterviewExperienceQuestions(id, questions)
+        : { ...experienceLinks.find((item) => item.id === id)!, questions };
+      setExperienceLinks((current) => current.map((item) => item.id === id ? updated : item));
+      return updated;
+    },
+    createMockSession: async ({ applicationId, questionCount, useExperience, useAi, useBank, bankQuestions, resumeQuestions: generatedResumeQuestions }) => {
       const id = makeId("mock");
       const imported = experienceLinks.filter((link) => link.applicationId === applicationId && link.status === "已提取").flatMap((link) => link.questions);
       const pool = [
         ...(useExperience ? imported.map((prompt) => ({ prompt, source: "面经" as const })) : []),
         ...(useAi ? (generatedResumeQuestions?.length ? generatedResumeQuestions : resumeQuestions).map((prompt) => ({ prompt, source: "AI 简历题" as const })) : []),
+        ...(useBank ? (bankQuestions ?? []).map((prompt) => ({ prompt, source: "个人题库" as const })) : []),
       ];
-      const questions = Array.from({ length: questionCount }, (_, index): InterviewQuestion => ({
-        id: `${id}-q${index + 1}`,
+      if (!pool.length) throw new Error("没有可用于本场模拟的问题");
+      const questionInputs = Array.from({ length: questionCount }, (_, index): CreateInterviewQuestion => ({
         prompt: pool[index % pool.length].prompt,
         source: pool[index % pool.length].source,
         answer: "",
       }));
-      setSessions((current) => [{ id, applicationId, type: "模拟面试", round: "技术综合模拟", createdAt: "刚刚", duration: "进行中", status: "进行中", questions }, ...current]);
-      return id;
+      const created = hasLocalDatabase
+        ? await createMockInterviewSession(applicationId, questionInputs)
+        : { id, applicationId, type: "模拟面试" as const, round: "技术综合模拟", createdAt: "刚刚", duration: "进行中", status: "进行中" as const, currentQuestionIndex: 0, questions: questionInputs.map((question, index) => ({ ...question, id: `${id}-q${index + 1}`, answer: question.answer || "" })) };
+      setSessions((current) => [created, ...current]);
+      return created;
     },
-    updateSessionAnswer: (sessionId, questionId, answer) => {
+    updateSessionAnswer: async (sessionId, questionId, answer) => {
       setSessions((current) => current.map((session) => session.id !== sessionId ? session : {
         ...session,
         questions: session.questions.map((question) => question.id === questionId ? { ...question, answer } : question),
       }));
+      if (hasLocalDatabase) {
+        const key = `${sessionId}:${questionId}`;
+        const previous = sessionAnswerQueues.current.get(key) ?? Promise.resolve();
+        const queued = previous.catch(() => undefined).then(() => updateInterviewSessionAnswer(sessionId, questionId, answer));
+        sessionAnswerQueues.current.set(key, queued);
+        try { await queued; }
+        finally { if (sessionAnswerQueues.current.get(key) === queued) sessionAnswerQueues.current.delete(key); }
+      }
     },
-    completeSession: (id) => {
-      setSessions((current) => current.map((session) => session.id !== id ? session : {
-        ...session,
+    updateSessionProgress: async (id, currentQuestionIndex) => {
+      setSessions((current) => current.map((session) => session.id === id ? { ...session, currentQuestionIndex } : session));
+      if (hasLocalDatabase) await updateInterviewSessionProgress(id, currentQuestionIndex);
+    },
+    completeSession: async (id) => {
+      const pending = [...sessionAnswerQueues.current.entries()]
+        .filter(([key]) => key.startsWith(`${id}:`))
+        .map(([, promise]) => promise.catch(() => undefined));
+      await Promise.all(pending);
+      if (hasLocalDatabase) {
+        const completed = await completeInterviewSession(id);
+        setSessions((current) => current.map((session) => session.id === id ? completed : session));
+        return completed;
+      }
+      const existing = sessions.find((session) => session.id === id);
+      if (!existing) throw new Error("面试会话不存在");
+      const completed: InterviewSession = {
+        ...existing,
         status: "待复盘",
-        duration: `${Math.max(10, session.questions.length * 3)} 分钟`,
-        questions: session.questions.map((question, index) => ({
+        duration: `${Math.max(10, existing.questions.length * 3)} 分钟`,
+        questions: existing.questions.map((question, index) => ({
           ...question,
           score: question.answer.trim() ? 72 + (index % 4) * 4 : 45,
           evaluation: question.answer.trim()
             ? "回答覆盖了主要思路，但还需要补充具体数据、方案取舍和验证结果。"
             : "本题未作答，建议先整理核心概念，再用项目案例形成完整回答。",
         })),
-      }));
+      };
+      setSessions((current) => current.map((session) => session.id === id ? completed : session));
+      return completed;
+    },
+    reviewSession: async (id) => {
+      if (!hasLocalDatabase) {
+        const existing = sessions.find((item) => item.id === id)!;
+        const reviewed = { ...existing, status: "复盘完成" as const, reviewSummary: "浏览器演示复盘结果。" };
+        setSessions((current) => current.map((item) => item.id === id ? reviewed : item));
+        return reviewed;
+      }
+      const reviewed = await generateInterviewReview(id);
+      setSessions((current) => current.map((session) => session.id === id ? reviewed : session));
+      return reviewed;
+    },
+    importTranscript: async (applicationId, transcript) => {
+      if (!hasLocalDatabase) throw new Error("浏览器演示模式不支持导入真实面试材料");
+      const imported = await importInterviewTranscript(applicationId, transcript);
+      setSessions((current) => [imported, ...current]);
+      return imported;
+    },
+    deleteSession: async (id) => {
+      if (hasLocalDatabase) await deleteInterviewSession(id);
+      setSessions((current) => current.filter((session) => session.id !== id));
     },
   }), [applications, applicationsError, applicationsLoading, eligibleApplications, experienceLinks, refreshApplications, selectedApplicationId, sessions]);
 
