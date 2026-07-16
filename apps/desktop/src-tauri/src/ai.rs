@@ -870,6 +870,7 @@ mod tests {
     fn transcript_privacy_setting_is_enforced_before_network_access() {
         let mut settings = AiProviderSettings {
             allow_transcript: false,
+            prompt_before_send: true,
             ..AiProviderSettings::default()
         };
         assert!(ensure_transcript_sharing_allowed(&settings).is_err());

@@ -25,9 +25,9 @@ impl Default for AiProviderSettings {
             fallback_model: None,
             max_output_tokens: 4096,
             timeout_seconds: 60,
-            allow_resume: false,
-            allow_transcript: false,
-            prompt_before_send: true,
+            allow_resume: true,
+            allow_transcript: true,
+            prompt_before_send: false,
         }
     }
 }
@@ -73,6 +73,7 @@ pub struct ProviderSettings {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EmailSettings {
+    pub accounts: Vec<EmailAccountSettings>,
     pub provider: String,
     pub email_address: String,
     pub imap_host: String,
@@ -89,6 +90,7 @@ pub struct EmailSettings {
 impl Default for EmailSettings {
     fn default() -> Self {
         Self {
+            accounts: Vec::new(),
             provider: "自定义 IMAP".into(),
             email_address: String::new(),
             imap_host: String::new(),
@@ -101,5 +103,72 @@ impl Default for EmailSettings {
             oauth_client_id: String::new(),
             oauth_tenant: "common".into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EmailAccountSettings {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub provider: String,
+    pub email_address: String,
+    pub imap_host: String,
+    pub imap_port: i64,
+    pub username: String,
+    pub use_tls: bool,
+    pub auth_method: String,
+    pub oauth_client_id: String,
+    pub oauth_tenant: String,
+}
+
+impl Default for EmailAccountSettings {
+    fn default() -> Self {
+        let legacy = EmailSettings::default();
+        Self {
+            id: String::new(),
+            name: String::new(),
+            enabled: true,
+            provider: legacy.provider,
+            email_address: legacy.email_address,
+            imap_host: legacy.imap_host,
+            imap_port: legacy.imap_port,
+            username: legacy.username,
+            use_tls: legacy.use_tls,
+            auth_method: legacy.auth_method,
+            oauth_client_id: legacy.oauth_client_id,
+            oauth_tenant: legacy.oauth_tenant,
+        }
+    }
+}
+
+impl EmailSettings {
+    pub fn active_accounts(&self) -> Vec<EmailAccountSettings> {
+        if !self.accounts.is_empty() {
+            return self
+                .accounts
+                .iter()
+                .filter(|account| account.enabled)
+                .cloned()
+                .collect();
+        }
+        if self.email_address.trim().is_empty() && self.username.trim().is_empty() {
+            return Vec::new();
+        }
+        vec![EmailAccountSettings {
+            id: "legacy".into(),
+            name: self.email_address.clone(),
+            enabled: self.enabled,
+            provider: self.provider.clone(),
+            email_address: self.email_address.clone(),
+            imap_host: self.imap_host.clone(),
+            imap_port: self.imap_port,
+            username: self.username.clone(),
+            use_tls: self.use_tls,
+            auth_method: self.auth_method.clone(),
+            oauth_client_id: self.oauth_client_id.clone(),
+            oauth_tenant: self.oauth_tenant.clone(),
+        }]
     }
 }

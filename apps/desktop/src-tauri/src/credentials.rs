@@ -7,7 +7,18 @@ const ALLOWED_KEYS: &[&str] = &[
 ];
 
 fn entry(key: &str) -> Result<keyring::Entry, String> {
-    if !ALLOWED_KEYS.contains(&key) {
+    let account_key = ["email_password:", "email_oauth_refresh_token:"]
+        .iter()
+        .any(|prefix| {
+            key.strip_prefix(prefix).is_some_and(|id| {
+                !id.is_empty()
+                    && id.len() <= 100
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+        });
+    if !ALLOWED_KEYS.contains(&key) && !account_key {
         return Err("不支持的凭据类型".to_string());
     }
     keyring::Entry::new(SERVICE_NAME, key).map_err(|error| format!("无法访问系统凭据库: {error}"))

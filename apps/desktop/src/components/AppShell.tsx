@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertCircle, BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, Clock3, FileCheck2, Inbox, Info, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
+import { AlertCircle, BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, Clock3, Download, FileCheck2, Inbox, Info, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
 import TitleBar from "./TitleBar";
 import { useTheme } from "../hooks/useTheme";
 import { useInterviewFlow } from "../hooks/useInterviewFlow";
@@ -11,6 +11,7 @@ import { listResumeProfiles } from "../services/resumes";
 import { getActivitySummary, getDashboard, type ActivitySummary, type DashboardTask } from "../services/dashboard";
 import { getEmailStats, listEmailMessages, syncEmails, type RecruitmentEmail } from "../services/emails";
 import { getProviderSettings } from "../services/settings";
+import { checkForUpdate, type AvailableUpdate } from "../services/updates";
 
 const nav = [
   ["/", "日历", CalendarDays], ["/applications", "我的投递", BriefcaseBusiness], ["/emails", "招聘邮件", Inbox],
@@ -44,6 +45,7 @@ export default function AppShell() {
   const [emailMessages, setEmailMessages] = useState<RecruitmentEmail[]>([]);
   const [emailPending, setEmailPending] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [notificationTasks, setNotificationTasks] = useState<DashboardTask[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
@@ -90,6 +92,15 @@ export default function AppShell() {
   useEffect(() => startTaskNotificationScheduler(), []);
   useEffect(() => () => { notificationRequest.current += 1; }, []);
 
+  useEffect(() => {
+    if (sessionStorage.getItem("applied-yet:update-checked")) return;
+    sessionStorage.setItem("applied-yet:update-checked", "1");
+    const timer = window.setTimeout(() => {
+      void checkForUpdate().then(setAvailableUpdate).catch(() => undefined);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   useEffect(() => { void refreshNotifications(); }, [location.pathname]);
 
   useEffect(() => {
@@ -111,7 +122,15 @@ export default function AppShell() {
       if (timer !== undefined) { window.clearInterval(timer); timer = undefined; }
       void getProviderSettings().then((settings) => {
         if (disposed || revision !== schedulerRevision || !settings.email.enabled) return;
-        timer = window.setInterval(() => { void syncEmails().then(refreshIndex).catch(() => undefined); }, Math.max(1, settings.email.pollingMinutes) * 60_000);
+        timer = window.setInterval(() => {
+          void syncEmails().then(refreshIndex).catch((reason) => {
+            void refreshIndex();
+            setToastKind("error");
+            setToast(`邮件自动检查异常：${String(reason)}`);
+            if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
+            localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 6000);
+          });
+        }, Math.max(1, settings.email.pollingMinutes) * 60_000);
       }).catch(() => undefined);
     };
     configureScheduler();
@@ -164,6 +183,8 @@ export default function AppShell() {
       if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
       localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 3200);
     } catch (reason) {
+      const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]).catch(() => [undefined, undefined] as const);
+      if (items && stats) { setEmailMessages(items); setEmailPending(stats.pending); }
       setToastKind("error"); setToast(`邮件检查失败：${String(reason)}`);
       if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
       localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 4200);
@@ -218,6 +239,7 @@ export default function AppShell() {
       <main key={location.pathname}><Outlet /></main>
     </div>
     {(toast || globalToast) && (() => { const kind = globalToast?.kind ?? toastKind; return <div className={`toast toast--${kind}`}>{kind === "error" ? <AlertCircle size={17}/> : kind === "info" ? <Info size={17}/> : <Check size={17}/>} {globalToast?.message ?? toast}<button onClick={() => { if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current); if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current); localToastTimer.current = undefined; globalToastTimer.current = undefined; setToast(""); setGlobalToast(null); }}><X size={15}/></button></div>; })()}
+    {availableUpdate && <div className="update-toast" role="status"><span><Download size={19}/></span><div><strong>发现新版本 v{availableUpdate.version}</strong><p>当前版本 v{availableUpdate.currentVersion}，点击查看更新内容并安装。</p><button type="button" onClick={() => { setAvailableUpdate(null); navigate("/settings?tab=updates"); }}>查看并更新</button></div><button type="button" className="update-toast-close" aria-label="关闭更新提示" onClick={() => setAvailableUpdate(null)}><X size={15}/></button></div>}
     {searchOpen && <div className="modal-backdrop" onMouseDown={() => setSearchOpen(false)}><div className="command" onMouseDown={(e)=>e.stopPropagation()}><div className="command-input"><Search size={20}/><input autoFocus value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索公司、岗位、邮件、面试记录…"/><kbd>ESC</kbd></div><div className="command-body">{searchContent}</div></div></div>}
   </div>;
 }

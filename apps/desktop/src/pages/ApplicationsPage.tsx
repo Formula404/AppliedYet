@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Columns3, Download, Filter, GripVertical, LayoutList, MapPin, Plus, Search, Trash2, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { DndContext, type DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
+import { DndContext, pointerWithin, type DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { columnStages, stageToneMap } from "../data/mock";
 import { Badge, Card, PageHeader } from "../components/ui";
@@ -18,9 +18,8 @@ const columns = [
   { label: "等待结果", match: ["等待"] },
   { label: "Offer", match: ["Offer", "谈薪"] },
   { label: "进入人才库", match: ["人才库"] },
-  { label: "其他状态", match: [] },
 ];
-const boardColumnForStage = (stage: string) => columns.find((column) => column.match.some((keyword) => stage.includes(keyword)))?.label ?? "其他状态";
+const boardColumnForStage = (stage: string) => columns.find((column) => column.match.some((keyword) => stage.includes(keyword)))?.label ?? "已投递";
 const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const localDateTime = (value: string) => {
   const date = new Date(value);
@@ -179,7 +178,7 @@ export default function ApplicationsPage() {
       </div>
       {applicationsLoading && <div className="success-banner">正在读取本地数据库…</div>}
       {view === "board" ? (
-        <DndContext onDragEnd={handleDragEnd}>
+        <DndContext collisionDetection={pointerWithin} onDragEnd={handleDragEnd}>
           <div className="kanban">
             {columns.map(col => {
               const items = filtered.filter((app) => !app.stage.includes("拒绝") && boardColumnForStage(app.stage) === col.label);
@@ -239,7 +238,7 @@ export default function ApplicationsPage() {
         <div>{archivedApps.map((app) => <div className="archived-application-row" key={app.id}><span className="company-logo">{app.companyMark}</span><button onClick={() => navigate(`/applications/${app.id}`)}><strong>{app.company}</strong><small>{app.role} · {app.city}</small></button><Badge tone="gray">{app.stage}</Badge><button type="button" className="button button--secondary" onClick={async () => { try { await archiveApplication(app.id, false); setNotice({ title: "投递已恢复", message: `${app.company} · ${app.role} 已重新加入看板与统计。`, kind: "success" }); } catch (reason) { setNotice({ title: "恢复失败", message: String(reason), kind: "error" }); } }}>恢复</button><button type="button" className="button button--secondary danger-text" onClick={() => setPendingDelete(app)}><Trash2 size={13}/>删除</button></div>)}</div>
       </Card>}
       {showNew && (
-        <div className="modal-backdrop">
+        <div className="modal-backdrop application-modal-backdrop">
           <div className="dialog application-dialog">
             <div className="dialog-head">
               <div><h2>新增投递</h2><p>先记录核心信息，稍后可继续完善岗位档案</p></div>

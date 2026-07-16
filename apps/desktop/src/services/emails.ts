@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { EmailSettings } from "./settings";
+import type { EmailAccountSettings } from "./settings";
 import { hasLocalDatabase } from "./applications";
 import { demoEmailStats, listDemoEmails, setDemoEmailStatus } from "../data/demo";
 
@@ -33,4 +33,4 @@ export const syncEmails = () => hasLocalDatabase ? invoke<EmailSyncResult>("sync
 export const confirmEmailMatch = (id: string) => hasLocalDatabase ? invoke<void>("confirm_email_match", { id }) : setDemoEmailStatus(id, "confirmed");
 export const ignoreEmail = (id: string) => hasLocalDatabase ? invoke<void>("ignore_email", { id }) : setDemoEmailStatus(id, "ignored");
 export const rematchEmail = (id: string) => hasLocalDatabase ? invoke<void>("rematch_email", { id }) : setDemoEmailStatus(id, "pending");
-export const authorizeEmailOAuth = (settings: EmailSettings) => invoke<void>("authorize_email_oauth", { settings });
+export const authorizeEmailOAuth = (account: EmailAccountSettings) => invoke<void>("authorize_email_oauth", { account });

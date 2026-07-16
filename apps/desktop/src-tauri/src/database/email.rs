@@ -305,13 +305,21 @@ impl Database {
             .map_err(db_error)?
             .ok_or_else(|| "匹配的投递不存在".to_string())?;
         let next_stage = suggested_stage.filter(|stage| should_advance(&current_stage, stage));
+        let effective_time: String = transaction.query_row(
+            "SELECT CASE
+                WHEN julianday(?2) >= julianday(COALESCE(MAX(happened_at), '1970-01-01T00:00:00Z')) THEN ?2
+                ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+             FROM application_events WHERE application_id=?1 AND reverted_at IS NULL",
+            params![application_id, received_at],
+            |row| row.get(0),
+        ).map_err(db_error)?;
         if let Some(stage) = next_stage.as_deref() {
-            transaction.execute("UPDATE applications SET current_stage=?2,status_updated_at=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1", params![application_id, stage, received_at]).map_err(db_error)?;
+            transaction.execute("UPDATE applications SET current_stage=?2,status_updated_at=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1", params![application_id, stage, effective_time]).map_err(db_error)?;
         }
         transaction.execute(
             "INSERT INTO application_events(id,application_id,event_type,title,content,source_type,source_id,stage_before,stage_after,happened_at,reversible)
              VALUES (?1,?2,'email_status',?3,?4,'email',?5,?6,?7,?8,?9)",
-            params![Uuid::new_v4().to_string(), application_id, category, subject, id, current_stage, next_stage.as_deref(), received_at, next_stage.is_some()],
+            params![Uuid::new_v4().to_string(), application_id, category, subject, id, current_stage, next_stage.as_deref(), effective_time, next_stage.is_some()],
         ).map_err(db_error)?;
         transaction.execute("UPDATE email_messages SET status='confirmed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1", [id]).map_err(db_error)?;
         transaction.commit().map_err(db_error)

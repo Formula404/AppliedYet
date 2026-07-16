@@ -33,6 +33,9 @@ export interface ProviderSettings {
 }
 
 export interface EmailSettings {
+  accounts: EmailAccountSettings[];
+  name?: string;
+  accountEnabled?: boolean;
   provider: string;
   emailAddress: string;
   imapHost: string;
@@ -41,6 +44,21 @@ export interface EmailSettings {
   useTls: boolean;
   pollingMinutes: number;
   enabled: boolean;
+  authMethod: "password" | "oauth2";
+  oauthClientId: string;
+  oauthTenant: string;
+}
+
+export interface EmailAccountSettings {
+  id: string;
+  name: string;
+  enabled: boolean;
+  provider: string;
+  emailAddress: string;
+  imapHost: string;
+  imapPort: number;
+  username: string;
+  useTls: boolean;
   authMethod: "password" | "oauth2";
   oauthClientId: string;
   oauthTenant: string;
@@ -55,9 +73,9 @@ export const defaultProviderSettings: ProviderSettings = {
     fallbackModel: "",
     maxOutputTokens: 4096,
     timeoutSeconds: 60,
-    allowResume: false,
-    allowTranscript: false,
-    promptBeforeSend: true,
+    allowResume: true,
+    allowTranscript: true,
+    promptBeforeSend: false,
   },
   asr: {
     provider: "OpenAI 兼容接口",
@@ -70,7 +88,7 @@ export const defaultProviderSettings: ProviderSettings = {
     keepOriginalAudio: true,
     deleteTemporaryFiles: true,
   },
-  email: { provider: "自定义 IMAP", emailAddress: "", imapHost: "", imapPort: 993, username: "", useTls: true, pollingMinutes: 10, enabled: false, authMethod: "password", oauthClientId: "", oauthTenant: "common" },
+  email: { accounts: [], provider: "自定义 IMAP", emailAddress: "", imapHost: "", imapPort: 993, username: "", useTls: true, pollingMinutes: 10, enabled: false, authMethod: "password", oauthClientId: "", oauthTenant: "common" },
 };
 
 export function getProviderSettings() {
@@ -100,14 +118,14 @@ export const setDataLocation = (directory: string) => invoke<string>("set_data_l
 export const backupDatabase = (path: string) => invoke<string>("backup_database", { path });
 export const restoreDatabase = (path: string) => invoke<string>("restore_database", { path });
 
-export function getCredentialStatus(key: "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token") {
+export function getCredentialStatus(key: string) {
   return invoke<boolean>("credential_status", { key });
 }
 
-export function setCredential(key: "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token", secret: string) {
+export function setCredential(key: string, secret: string) {
   return invoke<void>("set_credential", { key, secret });
 }
 
-export function deleteCredential(key: "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token") {
+export function deleteCredential(key: string) {
   return invoke<void>("delete_credential", { key });
 }

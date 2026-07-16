@@ -42,7 +42,7 @@ export default function EmailsPage() {
       const result = await syncEmails(); await load();
       window.dispatchEvent(new Event("email-index-changed"));
       showToast(`检查完成：读取 ${result.fetched} 封新邮件，识别 ${result.recognized} 封，匹配 ${result.matched} 封`);
-    } catch (reason) { showToast(`邮件检查失败：${String(reason)}`, "error"); }
+    } catch (reason) { await load(); window.dispatchEvent(new Event("email-index-changed")); showToast(`邮件检查失败：${String(reason)}`, "error"); }
     finally { setSyncing(false); }
   }
 
@@ -54,6 +54,7 @@ export default function EmailsPage() {
       if (action === "rematch") await rematchEmail(selected.id);
       await load();
       window.dispatchEvent(new Event("email-index-changed"));
+      if (action === "confirm") window.dispatchEvent(new Event("application-index-changed"));
       showToast(action === "confirm" ? "已写入投递时间线并安全更新阶段" : action === "ignore" ? "已忽略该邮件" : "已重新识别邮件阶段并匹配当前投递");
     } catch (reason) { showToast(String(reason), "error"); }
     finally { setBusy(false); }

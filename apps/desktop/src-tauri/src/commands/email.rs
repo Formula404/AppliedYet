@@ -62,25 +62,71 @@ pub(crate) fn get_email_stats(db: tauri::State<'_, Database>) -> Result<EmailSta
 #[tauri::command]
 pub(crate) async fn sync_emails(db: tauri::State<'_, Database>) -> Result<SyncResult, String> {
     let settings = db.get_provider_settings()?.email;
-    if settings.imap_host.trim().is_empty() || settings.username.trim().is_empty() {
-        return Err("请先在设置中填写 IMAP 服务器和登录用户名".into());
+    let accounts = settings.active_accounts();
+    if accounts.is_empty() {
+        return Err("请先在设置中添加并启用至少一个邮箱".into());
     }
-    if !settings.use_tls && !is_local_imap_host(&settings.imap_host) {
-        return Err("远程 IMAP 连接必须启用 TLS，已阻止明文发送邮箱凭据".into());
+    let mut total = SyncResult {
+        fetched: 0,
+        recognized: 0,
+        matched: 0,
+    };
+    let mut errors = Vec::new();
+    for account_settings in accounts {
+        let account_label = if account_settings.name.trim().is_empty() {
+            account_settings.email_address.clone()
+        } else {
+            account_settings.name.clone()
+        };
+        match sync_email_account(&db, account_settings).await {
+            Ok(result) => {
+                total.fetched += result.fetched;
+                total.recognized += result.recognized;
+                total.matched += result.matched;
+            }
+            Err(error) => errors.push(format!("{account_label}：{error}")),
+        }
     }
+    if !errors.is_empty() {
+        return Err(format!(
+            "部分邮箱检查失败（已读取 {} 封）：{}",
+            total.fetched,
+            errors.join("；")
+        ));
+    }
+    Ok(total)
+}
+
+async fn sync_email_account(
+    db: &Database,
+    settings: crate::db::EmailAccountSettings,
+) -> Result<SyncResult, String> {
+    let credential_suffix = if settings.id == "legacy" {
+        None
+    } else {
+        Some(settings.id.as_str())
+    };
     let auth = match settings.auth_method.as_str() {
         "oauth2" => {
             if settings.oauth_client_id.trim().is_empty() {
                 return Err("使用 OAuth2 前请填写桌面应用 Client ID".into());
             }
-            let refresh_token = credentials::get_secret("email_oauth_refresh_token")
+            let key = credential_suffix
+                .map(|id| format!("email_oauth_refresh_token:{id}"))
+                .unwrap_or_else(|| "email_oauth_refresh_token".into());
+            let refresh_token = credentials::get_secret(&key)
                 .map_err(|_| "请先在邮箱设置中完成 OAuth2 授权".to_string())?;
-            EmailAuth::OAuth2(refresh_access_token(&settings, &refresh_token).await?)
+            EmailAuth::OAuth2(refresh_access_token(&settings, &refresh_token, &key).await?)
         }
-        "password" => EmailAuth::Password(
-            credentials::get_secret("email_password")
-                .map_err(|_| "请先在设置中保存邮箱授权码或密码".to_string())?,
-        ),
+        "password" => {
+            let key = credential_suffix
+                .map(|id| format!("email_password:{id}"))
+                .unwrap_or_else(|| "email_password".into());
+            EmailAuth::Password(
+                credentials::get_secret(&key)
+                    .map_err(|_| "请先在设置中保存邮箱授权码或密码".to_string())?,
+            )
+        }
         _ => return Err("邮箱认证方式无效".into()),
     };
     let account = if settings.email_address.trim().is_empty() {
@@ -113,14 +159,13 @@ pub(crate) async fn sync_emails(db: tauri::State<'_, Database>) -> Result<SyncRe
 #[tauri::command]
 pub(crate) async fn authorize_email_oauth(
     app: tauri::AppHandle,
-    db: tauri::State<'_, Database>,
-    settings: crate::db::EmailSettings,
+    account: crate::db::EmailAccountSettings,
 ) -> Result<(), String> {
+    let settings = account;
     if settings.oauth_client_id.trim().is_empty() {
         return Err("请填写 OAuth2 桌面应用 Client ID".into());
     }
     oauth_endpoints(&settings)?;
-    db.save_email_settings(settings.clone())?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| format!("无法启动 OAuth2 本机回调: {error}"))?;
     let port = listener
@@ -146,9 +191,14 @@ pub(crate) async fn authorize_email_oauth(
     .await
     .map_err(|error| format!("OAuth2 回调任务失败: {error}"))??;
     let token = exchange_authorization_code(&settings, &callback, &redirect_uri, &verifier).await?;
+    let credential_key = if settings.id == "legacy" {
+        "email_oauth_refresh_token".to_string()
+    } else {
+        format!("email_oauth_refresh_token:{}", settings.id)
+    };
     if let Some(refresh_token) = token.refresh_token {
-        credentials::set_secret("email_oauth_refresh_token", &refresh_token)?;
-    } else if !credentials::has_secret("email_oauth_refresh_token")? {
+        credentials::set_secret(&credential_key, &refresh_token)?;
+    } else if !credentials::has_secret(&credential_key)? {
         return Err("服务商未返回刷新令牌，请撤销应用授权后重试".into());
     }
     Ok(())
@@ -173,7 +223,7 @@ pub(crate) fn rematch_email(db: tauri::State<'_, Database>, id: String) -> Resul
 }
 
 fn fetch_imap(
-    settings: crate::db::EmailSettings,
+    settings: crate::db::EmailAccountSettings,
     auth: EmailAuth,
     last_uid: u32,
 ) -> Result<FetchBatch, String> {
@@ -342,7 +392,7 @@ fn authenticate<T: Read + Write>(
 }
 
 fn oauth_endpoints(
-    settings: &crate::db::EmailSettings,
+    settings: &crate::db::EmailAccountSettings,
 ) -> Result<(String, String, String), String> {
     let provider = settings.provider.to_lowercase();
     if provider.contains("gmail") || settings.imap_host.eq_ignore_ascii_case("imap.gmail.com") {
@@ -375,7 +425,7 @@ fn oauth_endpoints(
 }
 
 fn build_authorization_url(
-    settings: &crate::db::EmailSettings,
+    settings: &crate::db::EmailAccountSettings,
     redirect_uri: &str,
     state: &str,
     challenge: &str,
@@ -486,7 +536,7 @@ fn reply_oauth(stream: &mut TcpStream, success: bool) -> std::io::Result<()> {
 }
 
 async fn exchange_authorization_code(
-    settings: &crate::db::EmailSettings,
+    settings: &crate::db::EmailAccountSettings,
     code: &str,
     redirect_uri: &str,
     verifier: &str,
@@ -506,8 +556,9 @@ async fn exchange_authorization_code(
 }
 
 async fn refresh_access_token(
-    settings: &crate::db::EmailSettings,
+    settings: &crate::db::EmailAccountSettings,
     refresh_token: &str,
+    credential_key: &str,
 ) -> Result<String, String> {
     let (_, token_endpoint, scope) = oauth_endpoints(settings)?;
     let token = request_token(
@@ -521,7 +572,7 @@ async fn refresh_access_token(
     )
     .await?;
     if let Some(next_refresh) = token.refresh_token.as_deref() {
-        credentials::set_secret("email_oauth_refresh_token", next_refresh)?;
+        credentials::set_secret(credential_key, next_refresh)?;
     }
     Ok(token.access_token)
 }
@@ -655,6 +706,7 @@ fn requires_imap_id(host: &str) -> bool {
     .any(|candidate| host == *candidate)
 }
 
+#[cfg(test)]
 fn is_local_imap_host(host: &str) -> bool {
     matches!(
         host.trim()
@@ -782,7 +834,7 @@ mod tests {
 
     #[test]
     fn google_authorization_uses_pkce_and_offline_access() {
-        let settings = crate::db::EmailSettings {
+        let settings = crate::db::EmailAccountSettings {
             provider: "Gmail".into(),
             imap_host: "imap.gmail.com".into(),
             oauth_client_id: "client-id".into(),

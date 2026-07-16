@@ -171,6 +171,13 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       .catch((error) => setApplicationsError(String(error)));
   }, [refreshApplications]);
 
+  useEffect(() => {
+    if (!hasLocalDatabase) return;
+    const changed = () => { void refreshApplications().catch(() => undefined); };
+    window.addEventListener("application-index-changed", changed);
+    return () => window.removeEventListener("application-index-changed", changed);
+  }, [refreshApplications]);
+
   const eligibleApplications = useMemo(() => applications.filter(isInterviewEligible), [applications]);
 
   const value = useMemo<InterviewFlowValue>(() => ({

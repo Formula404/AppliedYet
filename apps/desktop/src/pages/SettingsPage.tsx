@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { BrainCircuit, Database, ExternalLink, FolderOpen, KeyRound, Mail, Mic2, RotateCcw, ShieldCheck, UserRound } from "lucide-react";
+import { BrainCircuit, Database, Download, ExternalLink, FolderOpen, KeyRound, Mail, Mic2, Plus, RefreshCw, RotateCcw, ShieldCheck, Trash2, UserRound } from "lucide-react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Card, CardHeader } from "../components/ui";
 import { hasLocalDatabase } from "../services/applications";
@@ -8,6 +8,7 @@ import { authorizeEmailOAuth } from "../services/emails";
 import StructuredResumeSettings from "./StructuredResumeSettings";
 import { showToast } from "../services/toast";
 import { openExternalUrl } from "../services/external";
+import { checkForUpdate, currentAppVersion, downloadAndInstallUpdate, type AvailableUpdate } from "../services/updates";
 import {
   defaultProviderSettings,
   backupDatabase,
@@ -24,16 +25,18 @@ import {
   type AiProviderSettings,
   type AsrProviderSettings,
   type EmailSettings,
+  type EmailAccountSettings,
 } from "../services/settings";
 
-type Tab = "profile" | "ai" | "asr" | "email" | "data" | "privacy";
+type Tab = "profile" | "ai" | "asr" | "email" | "data" | "privacy" | "updates";
 type CredentialKey = "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token";
 
 export default function SettingsPage() {
-  const [tab, setTab] = useState<Tab>("profile");
+  const [tab, setTab] = useState<Tab>(() => new URLSearchParams(window.location.search).get("tab") === "updates" ? "updates" : "profile");
   const [ai, setAi] = useState<AiProviderSettings>(defaultProviderSettings.ai);
   const [asr, setAsr] = useState<AsrProviderSettings>(defaultProviderSettings.asr);
   const [email, setEmail] = useState<EmailSettings>(defaultProviderSettings.email);
+  const [emailAccountId, setEmailAccountId] = useState("");
   const [credentialStatus, setCredentialStatus] = useState({ ai_api_key: false, asr_api_key: false, email_password: false, email_oauth_refresh_token: false });
   const [secret, setSecret] = useState({ ai_api_key: "", asr_api_key: "", email_password: "", email_oauth_refresh_token: "" });
   const [loading, setLoading] = useState(true);
@@ -47,13 +50,18 @@ export default function SettingsPage() {
       return;
     }
     let disposed = false;
-    Promise.all([getProviderSettings(), getCredentialStatus("ai_api_key"), getCredentialStatus("asr_api_key"), getCredentialStatus("email_password"), getCredentialStatus("email_oauth_refresh_token")])
-      .then(([settings, aiKey, asrKey, emailPassword, emailOAuth]) => {
+    Promise.all([getProviderSettings(), getCredentialStatus("ai_api_key"), getCredentialStatus("asr_api_key")])
+      .then(([settings, aiKey, asrKey]) => {
         if (disposed) return;
         setAi(settings.ai);
         setAsr(settings.asr);
-        setEmail(settings.email);
-        setCredentialStatus({ ai_api_key: aiKey, asr_api_key: asrKey, email_password: emailPassword, email_oauth_refresh_token: emailOAuth });
+        const normalized = normalizeEmailSettings(settings.email);
+        setEmail(normalized);
+        if (normalized.accounts[0]) {
+          setEmailAccountId(normalized.accounts[0].id);
+          void Promise.all([getCredentialStatus(emailCredentialKey("email_password", normalized.accounts[0].id)), getCredentialStatus(emailCredentialKey("email_oauth_refresh_token", normalized.accounts[0].id))]).then(([password, oauth]) => setCredentialStatus((current) => ({ ...current, email_password: password, email_oauth_refresh_token: oauth })));
+        }
+        setCredentialStatus((current) => ({ ...current, ai_api_key: aiKey, asr_api_key: asrKey }));
       })
       .catch((reason) => { if (!disposed) { setError(String(reason)); showToast(String(reason), "error"); } })
       .finally(() => { if (!disposed) setLoading(false); });
@@ -117,11 +125,15 @@ export default function SettingsPage() {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
     try {
       if (hasLocalDatabase) {
-        if (email.enabled && email.authMethod === "password" && !credentialStatus.email_password && !secret.email_password.trim()) throw new Error("启用邮件检查前，请先填写并保存邮箱授权码或密码");
-        if (email.enabled && email.authMethod === "oauth2" && !credentialStatus.email_oauth_refresh_token) throw new Error("启用邮件检查前，请先完成 OAuth2 授权");
+        const account = currentEmailAccount(email, emailAccountId);
+        const accounts = email.accounts.map((item) => item.id === account.id ? account : item);
+        const nextEmail = { ...email, accounts };
+        if (account.enabled && account.authMethod === "password" && !credentialStatus.email_password && !secret.email_password.trim()) throw new Error("启用邮件检查前，请先填写并保存当前邮箱的授权码或密码");
+        if (account.enabled && account.authMethod === "oauth2" && !credentialStatus.email_oauth_refresh_token) throw new Error("启用邮件检查前，请先完成当前邮箱的 OAuth2 授权");
         // Credential first: never persist an enabled connection that cannot authenticate.
-        if (email.authMethod === "password") await saveCredential("email_password");
-        await saveEmailSettings(email);
+        if (account.authMethod === "password" && secret.email_password.trim()) await setCredential(emailCredentialKey("email_password", account.id), secret.email_password);
+        await saveEmailSettings(nextEmail);
+        setEmail(nextEmail);
         window.dispatchEvent(new Event("email-settings-changed"));
       }
       setMessage("邮箱设置已保存，后续邮件检查将使用此连接"); showToast("邮箱设置已保存");
@@ -132,8 +144,12 @@ export default function SettingsPage() {
   async function authorizeEmail() {
     setSaving(true); setError(""); setMessage("");
     try {
-      await saveEmailSettings(email);
-      await authorizeEmailOAuth(email);
+      const account = currentEmailAccount(email, emailAccountId);
+      const accounts = email.accounts.map((item) => item.id === account.id ? account : item);
+      const nextEmail = { ...email, accounts };
+      await saveEmailSettings(nextEmail);
+      await authorizeEmailOAuth(account);
+      setEmail(nextEmail);
       setCredentialStatus((current) => ({ ...current, email_oauth_refresh_token: true }));
       window.dispatchEvent(new Event("email-settings-changed"));
       setMessage("邮箱授权成功，可以开始检查邮件了"); showToast("邮箱授权成功");
@@ -145,13 +161,16 @@ export default function SettingsPage() {
     setError(""); setMessage("");
     try {
       if (hasLocalDatabase) {
-        if ((key === "email_password" || key === "email_oauth_refresh_token") && email.enabled) {
-          const disabledEmail = { ...email, enabled: false };
-          await saveEmailSettings(disabledEmail);
-          setEmail(disabledEmail);
+        const storedKey = key.startsWith("email_") ? emailCredentialKey(key as "email_password" | "email_oauth_refresh_token", emailAccountId) : key;
+        if (key === "email_password" || key === "email_oauth_refresh_token") {
+          const account = { ...currentEmailAccount(email, emailAccountId), enabled: false };
+          const accounts = email.accounts.map((item) => item.id === account.id ? account : item);
+          const nextEmail = { ...email, accounts, accountEnabled: false, enabled: email.enabled && accounts.some((item) => item.enabled) };
+          await saveEmailSettings(nextEmail);
+          setEmail(nextEmail);
           window.dispatchEvent(new Event("email-settings-changed"));
         }
-        await deleteCredential(key);
+        await deleteCredential(storedKey);
       }
       setCredentialStatus((current) => ({ ...current, [key]: false }));
       setSecret((current) => ({ ...current, [key]: "" }));
@@ -171,9 +190,37 @@ export default function SettingsPage() {
     } finally { setSaving(false); }
   }
 
+  function selectEmailAccount(account: EmailAccountSettings) {
+    setEmail((current) => ({ ...current, accounts: current.accounts.map((item) => item.id === emailAccountId ? currentEmailAccount(current, emailAccountId) : item), ...emailEditor(account) }));
+    setEmailAccountId(account.id);
+    setSecret((current) => ({ ...current, email_password: "", email_oauth_refresh_token: "" }));
+    if (hasLocalDatabase) Promise.all([
+      getCredentialStatus(emailCredentialKey("email_password", account.id)),
+      getCredentialStatus(emailCredentialKey("email_oauth_refresh_token", account.id)),
+    ]).then(([password, oauth]) => setCredentialStatus((current) => ({ ...current, email_password: password, email_oauth_refresh_token: oauth }))).catch(() => undefined);
+  }
+
+  function addEmailAccount() {
+    const account = newEmailAccount();
+    setEmail((current) => ({ ...current, accounts: [...current.accounts.map((item) => item.id === emailAccountId ? currentEmailAccount(current, emailAccountId) : item), account], ...emailEditor(account) }));
+    setEmailAccountId(account.id);
+    setCredentialStatus((current) => ({ ...current, email_password: false, email_oauth_refresh_token: false }));
+  }
+
+  async function removeEmailAccount() {
+    const remaining = email.accounts.filter((item) => item.id !== emailAccountId);
+    if (hasLocalDatabase) {
+      await Promise.all([deleteCredential(emailCredentialKey("email_password", emailAccountId)), deleteCredential(emailCredentialKey("email_oauth_refresh_token", emailAccountId))]);
+    }
+    const next = remaining[0];
+    setEmail(next ? { ...email, accounts: remaining, ...emailEditor(next) } : { ...defaultProviderSettings.email, accounts: remaining, pollingMinutes: email.pollingMinutes, enabled: email.enabled });
+    setEmailAccountId(next?.id ?? "");
+    if (next) selectEmailAccount(next);
+  }
+
   const navigation: Array<[Tab, typeof BrainCircuit, string]> = [
     ["profile", UserRound, "我的简历"], ["ai", BrainCircuit, "AI 服务"], ["asr", Mic2, "语音识别"], ["email", Mail, "邮箱设置"],
-    ["data", Database, "数据与备份"], ["privacy", ShieldCheck, "隐私与安全"],
+    ["data", Database, "数据与备份"], ["privacy", ShieldCheck, "隐私与安全"], ["updates", Download, "软件更新"],
   ];
   const selectedEmailPreset = EMAIL_PROVIDER_PRESETS.find((item) => item.name === email.provider);
 
@@ -188,12 +235,13 @@ export default function SettingsPage() {
         <ProviderPreset value={ai.provider} onChange={(provider) => { const preset = AI_PROVIDER_PRESETS.find((item) => item.name === provider); if (!preset) { setError("未知的 AI 服务厂商"); return; } setAi({ ...ai, provider: preset.name, protocol: preset.protocol, baseUrl: preset.baseUrl, model: preset.model, fallbackModel: preset.fallbackModel }); }} />
         <Field label="接口地址" hint="已根据厂商预设填充，也可以手动修改"><input required type="url" value={ai.baseUrl} onChange={(e) => setAi({ ...ai, baseUrl: e.target.value })} /></Field>
         <div className="settings-form-grid"><Field label="主模型"><input required value={ai.model} onChange={(e) => setAi({ ...ai, model: e.target.value })} /></Field><Field label="备用模型" hint="可选"><input value={ai.fallbackModel ?? ""} onChange={(e) => setAi({ ...ai, fallbackModel: e.target.value })} /></Field></div>
-        <div className="settings-form-grid"><Field label="最大输出 Token"><input type="number" min="256" max="32768" value={ai.maxOutputTokens} onChange={(e) => setAi({ ...ai, maxOutputTokens: Number(e.target.value) })} /></Field><Field label="请求超时（秒）"><input type="number" min="5" max="300" value={ai.timeoutSeconds} onChange={(e) => setAi({ ...ai, timeoutSeconds: Number(e.target.value) })} /></Field></div>
         <CredentialField status={credentialStatus.ai_api_key} value={secret.ai_api_key} onChange={(value) => setSecret({ ...secret, ai_api_key: value })} onDelete={() => removeCredential("ai_api_key")} />
         <div className="settings-inline-action"><button type="button" className="button button--secondary" disabled={!hasLocalDatabase || saving || (!credentialStatus.ai_api_key && !secret.ai_api_key.trim())} onClick={testConnection}>保存并测试连接</button><small>保存后会发送一个测试请求确认服务可用</small></div>
-        <Card className="privacy-card"><CardHeader title="AI 数据范围" subtitle="控制哪些数据会发送给 AI 服务" /><Toggle checked={ai.allowResume} onChange={(allowResume) => setAi({ ...ai, allowResume })} label="允许向 AI 服务发送简历与岗位信息" /><Toggle checked={ai.allowTranscript} onChange={(allowTranscript) => setAi({ ...ai, allowTranscript })} label="允许向 AI 服务发送面试转写内容" /><Toggle checked={ai.promptBeforeSend} onChange={(promptBeforeSend) => setAi({ ...ai, promptBeforeSend })} label="每次发送简历等敏感内容前要求确认" /></Card>
+        <div className="ai-disclosure"><span><ShieldCheck size={17}/></span><div><strong>AI 辅助已默认开启 <em>按需调用</em></strong><p>仅在你主动使用 AI 功能时，相关简历、岗位或面试内容才会发送至所选服务商；其余数据仍保存在本地。</p></div></div>
       </ProviderForm>}
       {!loading && tab === "email" && <ProviderForm title="邮箱设置" subtitle="连接邮箱，自动识别招聘邮件" onSubmit={submitEmail} saving={saving}>
+        <div className="email-account-picker"><div>{email.accounts.map((account) => <button type="button" className={account.id === emailAccountId ? "active" : ""} key={account.id} onClick={() => selectEmailAccount(account)}><Mail size={14}/><span>{account.name || account.emailAddress || "未命名邮箱"}</span>{account.enabled && <em>启用</em>}</button>)}</div><button type="button" className="button button--secondary" onClick={addEmailAccount}><Plus size={15}/>添加邮箱</button></div>
+        {emailAccountId && <div className="settings-inline-action"><Field label="账户名称" hint="用于区分多个收件邮箱"><input value={email.name ?? ""} onChange={(event) => setEmail({ ...email, name: event.target.value })} /></Field>{email.accounts.length > 1 && <button type="button" className="text-button danger-text" onClick={() => void removeEmailAccount()}><Trash2 size={14}/>删除此邮箱</button>}</div>}
         <Field label="邮箱服务" hint="选择常用服务商后会自动填写 IMAP 服务器、端口和推荐认证方式"><select value={email.provider} onChange={(event) => { const provider = event.target.value; const preset = EMAIL_PROVIDER_PRESETS.find((item) => item.name === provider); setEmail(preset ? { ...email, provider, imapHost: preset.imapHost, imapPort: preset.imapPort, useTls: preset.useTls, authMethod: preset.authMethod } : { ...email, provider }); }}>{EMAIL_PROVIDER_PRESETS.map((item) => <option key={item.name}>{item.name}</option>)}</select></Field>
         <div className="settings-form-grid"><Field label="邮箱地址"><input type="email" value={email.emailAddress} onChange={(event) => setEmail({ ...email, emailAddress: event.target.value })} /></Field><Field label="登录用户名" hint="通常与邮箱地址相同"><input value={email.username} onChange={(event) => setEmail({ ...email, username: event.target.value })} /></Field></div>
         <div className="settings-form-grid"><Field label="IMAP 服务器"><input placeholder="imap.example.com" value={email.imapHost} onChange={(event) => setEmail({ ...email, imapHost: event.target.value })} /></Field><Field label="端口"><input type="number" min="1" max="65535" value={email.imapPort} onChange={(event) => setEmail({ ...email, imapPort: Number(event.target.value) })} /></Field></div>
@@ -205,7 +253,7 @@ export default function SettingsPage() {
         </>}
         {selectedEmailPreset?.credentialUrl && <div className="settings-inline-action"><a className="button button--secondary" href={selectedEmailPreset.credentialUrl} onClick={(event) => { event.preventDefault(); void openExternalUrl(selectedEmailPreset.credentialUrl).catch((reason) => showToast(String(reason), "error")); }}><ExternalLink size={15} />{selectedEmailPreset.credentialAction}</a><small>{selectedEmailPreset.credentialHint}</small></div>}
         <div className="settings-form-grid"><Field label="检查间隔（分钟）"><input type="number" min="1" max="1440" value={email.pollingMinutes} onChange={(event) => setEmail({ ...email, pollingMinutes: Number(event.target.value) })} /></Field><span /></div>
-        <Card className="privacy-card"><CardHeader title="连接行为" subtitle="放心设置，不会影响你的原邮件" /><Toggle checked={email.useTls} onChange={(useTls) => setEmail({ ...email, useTls, imapPort: useTls && email.imapPort === 143 ? 993 : email.imapPort })} label="使用 TLS 加密连接（远程服务器必须启用，防止凭据和邮件明文传输）" /><Toggle checked={email.enabled} onChange={(enabled) => setEmail({ ...email, enabled })} label="启用定时邮件检查（按上方间隔自动读取新邮件）" /></Card>
+        <Card className="privacy-card"><CardHeader title="连接行为" subtitle="放心设置，不会影响你的原邮件" /><Toggle checked={email.useTls} onChange={(useTls) => setEmail({ ...email, useTls, imapPort: useTls && email.imapPort === 143 ? 993 : email.imapPort })} label="使用 TLS 加密连接（远程服务器必须启用，防止凭据和邮件明文传输）" /><Toggle checked={email.accountEnabled ?? true} onChange={(accountEnabled) => setEmail({ ...email, accountEnabled })} label="启用当前邮箱收信" /><Toggle checked={email.enabled} onChange={(enabled) => setEmail({ ...email, enabled })} label="启用定时邮件检查（按上方间隔自动读取所有已启用邮箱）" /></Card>
       </ProviderForm>}
       {!loading && tab === "asr" && <ProviderForm title="语音识别" subtitle="配置语音转文字，方便导入面试录音" onSubmit={submitAsr} saving={saving}>
         <Field label="接口地址" hint="OpenAI 兼容的 /audio/transcriptions 接口"><input required type="url" value={asr.baseUrl} onChange={(e) => setAsr({ ...asr, baseUrl: e.target.value })} /></Field>
@@ -217,8 +265,48 @@ export default function SettingsPage() {
       </ProviderForm>}
       {!loading && tab === "data" && <DataSettings />}
       {!loading && tab === "privacy" && <Card><CardHeader title="隐私与安全" subtitle="你的数据安全由你掌控" /><div className="setting-block"><div><strong>敏感凭据单独保管</strong><p>AI、语音和邮箱密码保存在 Windows 凭据管理器，不写入业务数据库或备份。</p></div><KeyRound size={20} /></div><div className="setting-block"><div><strong>本地数据由你掌控</strong><p>投递、简历和面试记录默认存放在你选择的本地目录；只有使用 AI、语音识别或邮箱检查时，相关必要内容才会发往你配置的服务。</p></div></div><div className="setting-block"><div><strong>删除会同步解除关联</strong><p>删除简历时会解除投递关系；删除或移动数据前，界面会明确提示影响范围。</p></div></div></Card>}
+      {!loading && tab === "updates" && <UpdateSettings />}
     </div>
   </div>;
+}
+
+function UpdateSettings() {
+  const [version, setVersion] = useState("读取中…");
+  const [update, setUpdate] = useState<AvailableUpdate | null>(null);
+  const [status, setStatus] = useState("点击按钮检查 GitHub Releases 中的最新版本。");
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
+
+  useEffect(() => { void currentAppVersion().then(setVersion).catch(() => setVersion("未知")); }, []);
+
+  async function runCheck() {
+    setChecking(true); setUpdate(null); setProgress(null); setStatus("正在检查更新…");
+    try {
+      const result = await checkForUpdate();
+      setUpdate(result);
+      setStatus(result ? `发现新版本 v${result.version}` : "当前已是最新版本。");
+    } catch (reason) { setStatus(`检查失败：${String(reason)}`); }
+    finally { setChecking(false); }
+  }
+
+  async function install() {
+    setInstalling(true); setStatus("正在准备下载更新…");
+    let downloaded = 0;
+    let total = 0;
+    try {
+      await downloadAndInstallUpdate((event) => {
+        if (event.event === "Started") { total = event.data.contentLength ?? 0; setProgress(0); setStatus("正在下载更新…"); }
+        if (event.event === "Progress") { downloaded += event.data.chunkLength; setProgress(total ? Math.min(100, Math.round(downloaded / total * 100)) : null); }
+        if (event.event === "Finished") { setProgress(100); setStatus("更新已下载，正在安装并重启…"); }
+      });
+    } catch (reason) { setStatus(`更新失败：${String(reason)}`); setInstalling(false); }
+  }
+
+  return <Card className="update-settings"><CardHeader title="软件更新" subtitle="通过 GitHub Releases 获取经过签名验证的更新" />
+    <div className="setting-block"><div><strong>当前版本</strong><p>v{version}</p></div><button type="button" className="button button--secondary" disabled={checking || installing} onClick={() => void runCheck()}><RefreshCw size={15} className={checking ? "spin" : ""}/>{checking ? "正在检查…" : "检查更新"}</button></div>
+    <div className="update-status" role="status"><strong>{status}</strong>{update?.notes && <p className="update-notes">{update.notes}</p>}{progress !== null && <div className="update-progress"><i style={{ width: `${progress}%` }}/><span>{progress}%</span></div>}{update && <button type="button" className="button button--primary" disabled={installing} onClick={() => void install()}><Download size={15}/>{installing ? "正在更新…" : `下载并安装 v${update.version}`}</button>}</div>
+  </Card>;
 }
 
 const AI_PROVIDER_PRESETS = [
@@ -232,6 +320,31 @@ const AI_PROVIDER_PRESETS = [
   { name: "硅基流动", protocol: "chat" as const, baseUrl: "https://api.siliconflow.cn/v1", model: "deepseek-ai/DeepSeek-V3", fallbackModel: "" },
   { name: "自定义 OpenAI 兼容", protocol: "chat" as const, baseUrl: "https://", model: "", fallbackModel: "" },
 ];
+
+function newEmailAccount(): EmailAccountSettings {
+  return { id: crypto.randomUUID(), name: "", enabled: true, provider: "自定义 IMAP", emailAddress: "", imapHost: "", imapPort: 993, username: "", useTls: true, authMethod: "password", oauthClientId: "", oauthTenant: "common" };
+}
+
+function emailEditor(account: EmailAccountSettings) {
+  return { name: account.name, accountEnabled: account.enabled, provider: account.provider, emailAddress: account.emailAddress, imapHost: account.imapHost, imapPort: account.imapPort, username: account.username, useTls: account.useTls, authMethod: account.authMethod, oauthClientId: account.oauthClientId, oauthTenant: account.oauthTenant };
+}
+
+function currentEmailAccount(email: EmailSettings, id: string): EmailAccountSettings {
+  return { id, name: email.name || email.emailAddress, enabled: email.accountEnabled ?? true, provider: email.provider, emailAddress: email.emailAddress, imapHost: email.imapHost, imapPort: email.imapPort, username: email.username, useTls: email.useTls, authMethod: email.authMethod, oauthClientId: email.oauthClientId, oauthTenant: email.oauthTenant };
+}
+
+function normalizeEmailSettings(email: EmailSettings): EmailSettings {
+  let accounts = email.accounts ?? [];
+  if (!accounts.length && (email.emailAddress || email.username)) {
+    accounts = [{ ...currentEmailAccount(email, "legacy"), enabled: email.enabled }];
+  }
+  if (!accounts.length) accounts = [newEmailAccount()];
+  return { ...email, accounts, ...emailEditor(accounts[0]!) };
+}
+
+function emailCredentialKey(kind: "email_password" | "email_oauth_refresh_token", id: string) {
+  return id === "legacy" ? kind : `${kind}:${id}`;
+}
 
 const EMAIL_PROVIDER_PRESETS = [
   { name: "自定义 IMAP", imapHost: "", imapPort: 993, useTls: true, authMethod: "password" as const, credentialUrl: "", credentialAction: "", credentialHint: "" },

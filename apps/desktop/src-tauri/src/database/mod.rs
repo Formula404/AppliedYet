@@ -18,8 +18,9 @@ pub use interviews::{
 use migrations::MIGRATIONS;
 pub use models::{
     AiApplicationContext, AiCallSummary, AiProviderSettings, AsrProviderSettings,
-    CreateResumeProfileInput, EmailSettings, ProcessingJobResult, ProviderSettings,
-    ResumeAiContext, ResumeProfile, StoredInterviewPreparation, UpdateResumeProfileInput,
+    CreateResumeProfileInput, EmailAccountSettings, EmailSettings, ProcessingJobResult,
+    ProviderSettings, ResumeAiContext, ResumeProfile, StoredInterviewPreparation,
+    UpdateResumeProfileInput,
 };
 
 pub struct Database {
@@ -1673,37 +1674,69 @@ impl Database {
     }
 
     pub fn save_email_settings(&self, settings: EmailSettings) -> Result<(), String> {
-        if settings.provider.chars().count() > 200
-            || settings.email_address.chars().count() > 320
-            || settings.username.chars().count() > 500
-            || settings.oauth_client_id.chars().count() > 500
-            || settings.oauth_tenant.chars().count() > 500
+        if settings.accounts.len() > 20 {
+            return Err("最多可添加 20 个邮箱账户".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for account in &settings.accounts {
+            if account.id.is_empty()
+                || account.id.len() > 100
+                || !account
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                || !ids.insert(&account.id)
+            {
+                return Err("邮箱账户标识无效或重复".into());
+            }
+            validate_email_account(account)?;
+        }
+        if settings.enabled
+            && !settings.accounts.is_empty()
+            && !settings.accounts.iter().any(|account| account.enabled)
+        {
+            return Err("启用定时检查前，请至少启用一个邮箱账户".into());
+        }
+        if settings.accounts.is_empty()
+            && (settings.provider.chars().count() > 200
+                || settings.email_address.chars().count() > 320
+                || settings.username.chars().count() > 500
+                || settings.oauth_client_id.chars().count() > 500
+                || settings.oauth_tenant.chars().count() > 500)
         {
             return Err("邮箱设置中的文本字段过长".into());
         }
-        if settings.enabled
+        if settings.accounts.is_empty()
+            && settings.enabled
             && (settings.email_address.trim().is_empty()
                 || settings.imap_host.trim().is_empty()
                 || settings.username.trim().is_empty())
         {
             return Err("启用邮箱检查前，请填写邮箱地址、IMAP 服务器和用户名".into());
         }
-        if !(1..=65535).contains(&settings.imap_port) {
+        if settings.accounts.is_empty() && !(1..=65535).contains(&settings.imap_port) {
             return Err("IMAP 端口无效".into());
         }
         if !(1..=1440).contains(&settings.polling_minutes) {
             return Err("检查间隔必须在 1 到 1440 分钟之间".into());
         }
-        if !matches!(settings.auth_method.as_str(), "password" | "oauth2") {
+        if settings.accounts.is_empty()
+            && !matches!(settings.auth_method.as_str(), "password" | "oauth2")
+        {
             return Err("邮箱认证方式无效".into());
         }
-        if settings.enabled
+        if settings.accounts.is_empty()
+            && settings.enabled
             && settings.auth_method == "oauth2"
             && settings.oauth_client_id.trim().is_empty()
         {
             return Err("使用 OAuth2 前请填写桌面应用 Client ID".into());
         }
-        let host = settings.imap_host.trim();
+        let host = if settings.accounts.is_empty() {
+            settings.imap_host.trim()
+        } else {
+            ""
+        };
         if !host.is_empty() && !valid_network_host(host) {
             return Err("IMAP 服务器地址无效".into());
         }
@@ -2882,6 +2915,7 @@ fn clean_external_url(value: Option<String>, field: &str) -> Result<Option<Strin
     Ok(Some(parsed.to_string()))
 }
 fn valid_network_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.');
     if host.parse::<std::net::IpAddr>().is_ok() {
         return true;
     }
@@ -2903,11 +2937,51 @@ fn valid_network_host(host: &str) -> bool {
                     .is_some_and(u8::is_ascii_alphanumeric)
         })
 }
+
+fn validate_email_account(account: &EmailAccountSettings) -> Result<(), String> {
+    if account.provider.chars().count() > 200
+        || account.name.chars().count() > 200
+        || account.email_address.chars().count() > 320
+        || account.username.chars().count() > 500
+        || account.oauth_client_id.chars().count() > 500
+        || account.oauth_tenant.chars().count() > 500
+    {
+        return Err("邮箱设置中的文本字段过长".into());
+    }
+    if account.enabled
+        && (account.email_address.trim().is_empty()
+            || account.imap_host.trim().is_empty()
+            || account.username.trim().is_empty())
+    {
+        return Err(format!(
+            "邮箱“{}”缺少邮箱地址、IMAP 服务器或用户名",
+            account.name
+        ));
+    }
+    if !(1..=65535).contains(&account.imap_port) {
+        return Err("IMAP 端口无效".into());
+    }
+    if !matches!(account.auth_method.as_str(), "password" | "oauth2") {
+        return Err("邮箱认证方式无效".into());
+    }
+    if account.enabled
+        && account.auth_method == "oauth2"
+        && account.oauth_client_id.trim().is_empty()
+    {
+        return Err("使用 OAuth2 前请填写桌面应用 Client ID".into());
+    }
+    let host = account.imap_host.trim();
+    if !host.is_empty() && !valid_network_host(host) {
+        return Err("IMAP 服务器地址无效".into());
+    }
+    if !host.is_empty() && !account.use_tls && !is_local_network_host(host) {
+        return Err("远程 IMAP 连接必须启用 TLS".into());
+    }
+    Ok(())
+}
 fn is_local_network_host(host: &str) -> bool {
-    matches!(
-        host.to_ascii_lowercase().as_str(),
-        "localhost" | "127.0.0.1" | "::1"
-    )
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
 }
 fn priority_label(priority: i64) -> &'static str {
     match priority {
@@ -3945,6 +4019,54 @@ mod tests {
                 ..EmailSettings::default()
             })
             .is_err());
+    }
+
+    #[test]
+    fn multi_account_settings_ignore_legacy_flat_fields_and_allow_disabled_drafts() {
+        let db = Database::in_memory().unwrap();
+        let active = EmailAccountSettings {
+            id: "account-a".into(),
+            name: "主邮箱".into(),
+            enabled: true,
+            email_address: "jobs@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            username: "jobs@example.com".into(),
+            ..EmailAccountSettings::default()
+        };
+        let draft = EmailAccountSettings {
+            id: "account-b".into(),
+            enabled: false,
+            ..EmailAccountSettings::default()
+        };
+
+        db.save_email_settings(EmailSettings {
+            accounts: vec![active, draft],
+            enabled: true,
+            email_address: String::new(),
+            imap_host: String::new(),
+            username: String::new(),
+            ..EmailSettings::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn localhost_fqdn_is_allowed_without_tls() {
+        let db = Database::in_memory().unwrap();
+        db.save_email_settings(EmailSettings {
+            accounts: vec![EmailAccountSettings {
+                id: "local-account".into(),
+                enabled: true,
+                email_address: "jobs@localhost".into(),
+                imap_host: "localhost.".into(),
+                username: "jobs".into(),
+                use_tls: false,
+                ..EmailAccountSettings::default()
+            }],
+            enabled: true,
+            ..EmailSettings::default()
+        })
+        .unwrap();
     }
 
     #[test]

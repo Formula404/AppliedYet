@@ -2255,9 +2255,65 @@ textarea { resize: vertical; }
 }
 
 .application-dialog {
-  margin-top: -3vh;
-  max-height: calc(100vh - 54px);
-  overflow: auto
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: 100%;
+  overflow: hidden
+}
+
+.update-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 65;
+  width: min(370px, calc(100vw - 44px));
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 16px 40px rgba(16, 24, 40, .22);
+  animation: toastIn .25s;
+}
+
+.update-toast>span { color: var(--primary); }
+.update-toast>div { flex: 1; }
+.update-toast strong { font-size: 12px; }
+.update-toast p { margin: 5px 0 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.update-toast>div>button { border: 0; padding: 0; background: transparent; color: var(--primary); font-size: 11px; font-weight: 600; }
+.update-toast .update-toast-close { align-self: flex-start; border: 0; padding: 2px; background: transparent; color: var(--muted); }
+
+.application-modal-backdrop {
+  align-items: center;
+  box-sizing: border-box;
+  padding: 16px;
+  overflow: hidden
+}
+
+.application-dialog > .dialog-head {
+  flex: 0 0 auto
+}
+
+.application-dialog > form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden
+}
+
+.application-dialog > form > .form-grid {
+  min-height: 0;
+  padding-right: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable
+}
+
+.application-dialog > form > .dialog-actions {
+  flex: 0 0 auto
 }
 
 .page-header-actions {
@@ -4035,7 +4091,9 @@ textarea { resize: vertical; }
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 8px;
-  height: max-content
+  height: max-content;
+  position: sticky;
+  top: 82px
 }
 
 .settings-layout>aside button {
@@ -4726,6 +4784,99 @@ textarea { resize: vertical; }
 .credential-state.is-set {
   background: var(--green-soft);
   color: var(--green)
+}
+
+.update-status { padding: 18px 16px; }
+.update-status>strong { display: block; font-size: 11px; }
+.update-notes { margin: 10px 0; padding: 12px; border-radius: 8px; background: var(--surface-hover); color: var(--muted); font-size: 10px; line-height: 1.6; white-space: pre-wrap; }
+.update-status>.button { margin-top: 14px; }
+.update-progress { position: relative; height: 8px; margin-top: 14px; overflow: hidden; border-radius: 999px; background: var(--surface-hover); }
+.update-progress i { display: block; height: 100%; border-radius: inherit; background: var(--primary); transition: width .2s; }
+.update-progress span { position: absolute; right: 5px; top: -2px; color: var(--text); font-size: 8px; line-height: 12px; }
+
+.email-account-picker {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.email-account-picker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.email-account-picker > div > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
+  color: var(--text-secondary);
+  background: var(--soft);
+  border: 1px solid transparent;
+  border-radius: 9px;
+}
+
+.email-account-picker > div > button.active {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--primary);
+}
+
+.email-account-picker em {
+  color: var(--green);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.ai-disclosure {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 15px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--green) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--green) 18%, var(--border));
+  border-radius: 11px;
+}
+
+.ai-disclosure > span {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  border-radius: 8px;
+  place-items: center;
+}
+
+.ai-disclosure strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.ai-disclosure em {
+  padding: 2px 7px;
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 11%, transparent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.ai-disclosure p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .danger-text {
