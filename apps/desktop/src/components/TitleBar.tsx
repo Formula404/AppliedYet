@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { exit } from "@tauri-apps/plugin-process";
 
 const win = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
   ? getCurrentWindow()
@@ -52,6 +54,7 @@ export default function TitleBar() {
     let disposed = false;
     const unlisten: (() => void)[] = [];
     if (!win) return undefined;
+    let handlingClose = false;
     (async () => {
       const initialMaximized = await win.isMaximized();
       const initialFocused = await win.isFocused();
@@ -63,6 +66,26 @@ export default function TitleBar() {
         if (!disposed) void syncMaximizedState();
       });
       if (disposed) stopResizeListener(); else unlisten.push(stopResizeListener);
+      const stopCloseListener = await win.onCloseRequested(async (event) => {
+        event.preventDefault();
+        if (handlingClose) return;
+        handlingClose = true;
+        try {
+          const keepRunning = await ask("最小化到系统托盘后，邮件自动检查和任务提醒会继续在后台运行。", {
+            title: "关闭投了吗",
+            kind: "info",
+            okLabel: "最小化到托盘",
+            cancelLabel: "退出应用",
+          });
+          if (keepRunning) await win.hide();
+          else await exit(0);
+        } catch (error) {
+          console.error("处理窗口关闭失败", error);
+        } finally {
+          handlingClose = false;
+        }
+      });
+      if (disposed) stopCloseListener(); else unlisten.push(stopCloseListener);
 
       if (disposed) return;
 

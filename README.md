@@ -128,8 +128,14 @@ npm run dev
 开发桌面版需要 Node.js 20+、npm 10+、Rust stable（MSVC toolchain）、Microsoft C++ Build Tools 和 WebView2：
 
 ```powershell
-npm install
-npm run tauri -- dev
+npm --prefix apps/desktop install
+npm --prefix apps/desktop run tauri:dev
+```
+
+在仓库根目录 `F:\Postgraduate\AppliedYet` 已安装依赖时，一句话启动隔离的桌面开发版：
+
+```powershell
+npm --prefix apps/desktop run tauri:dev
 ```
 
 提交变更前请运行完整检查：

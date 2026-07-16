@@ -12,6 +12,7 @@ mod experience;
 mod http;
 mod resume;
 mod resume_ai;
+mod system_proxy;
 
 use db::Database;
 
@@ -55,6 +56,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             open_external_url,
+            system_proxy::get_system_proxy,
             commands::applications::list_applications,
             commands::applications::get_activity_summary,
             commands::applications::get_analytics,
@@ -137,6 +139,7 @@ pub fn run() {
                 .unwrap_or_else(|| data_dir.join("applied-yet.sqlite3"));
             let database = Database::open(&database_path).map_err(std::io::Error::other)?;
             app.manage(database);
+            setup_tray(app)?;
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_shadow(true);
@@ -145,6 +148,54 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动投了吗失败");
+}
+
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::{
+        menu::{Menu, MenuItem},
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    };
+
+    let show = MenuItem::with_id(app, "show", "显示投了吗", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出投了吗", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("投了吗 · Applied Yet?")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 #[cfg(test)]

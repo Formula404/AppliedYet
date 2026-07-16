@@ -1,4 +1,7 @@
+#[cfg(not(debug_assertions))]
 const SERVICE_NAME: &str = "com.appliedyet.desktop";
+#[cfg(debug_assertions)]
+const SERVICE_NAME: &str = "com.appliedyet.desktop.dev";
 const ALLOWED_KEYS: &[&str] = &[
     "ai_api_key",
     "asr_api_key",
