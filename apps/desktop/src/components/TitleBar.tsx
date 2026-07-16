@@ -53,26 +53,21 @@ export default function TitleBar() {
     const unlisten: (() => void)[] = [];
     if (!win) return undefined;
     (async () => {
-      const [initialMaximized, initialFocused, stopFocusListener, stopResizeListener] = await Promise.all([
-        win.isMaximized(),
-        win.isFocused(),
-        win.onFocusChanged(({ payload }) => {
-          if (!disposed) setFocused(payload);
-        }),
-        win.onResized(() => {
-          if (!disposed) void syncMaximizedState();
-        }),
-      ]);
+      const initialMaximized = await win.isMaximized();
+      const initialFocused = await win.isFocused();
+      const stopFocusListener = await win.onFocusChanged(({ payload }) => {
+        if (!disposed) setFocused(payload);
+      });
+      if (disposed) stopFocusListener(); else unlisten.push(stopFocusListener);
+      const stopResizeListener = await win.onResized(() => {
+        if (!disposed) void syncMaximizedState();
+      });
+      if (disposed) stopResizeListener(); else unlisten.push(stopResizeListener);
 
-      if (disposed) {
-        stopFocusListener();
-        stopResizeListener();
-        return;
-      }
+      if (disposed) return;
 
       setMaximized(initialMaximized);
       setFocused(initialFocused);
-      unlisten.push(stopFocusListener, stopResizeListener);
     })().catch((error) => console.error("无法初始化窗口控制", error));
 
     return () => {
@@ -102,7 +97,7 @@ export default function TitleBar() {
       handleToggleMaximize();
       return;
     }
-    void win.startDragging();
+    void win.startDragging().catch((error) => console.error("窗口拖动失败", error));
   };
 
   return (
@@ -112,13 +107,13 @@ export default function TitleBar() {
         <span className="titlebar-subtitle">Applied Yet?</span>
       </div>
       <div className="titlebar-controls">
-        <button type="button" className="tb-btn" onClick={() => void win?.minimize()} aria-label="最小化" title="最小化" disabled={!win}>
+        <button type="button" className="tb-btn" onClick={() => { void win?.minimize().catch((error) => console.error("窗口最小化失败", error)); }} aria-label="最小化" title="最小化" disabled={!win}>
           <MinusIcon />
         </button>
-        <button type="button" className="tb-btn" onClick={handleToggleMaximize} disabled={changingWindowState} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
+        <button type="button" className="tb-btn" onClick={handleToggleMaximize} disabled={!win || changingWindowState} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
           {maximized ? <RestoreIcon /> : <MaximizeIcon />}
         </button>
-        <button type="button" className="tb-btn tb-close" onClick={() => void win?.close()} aria-label="关闭" title="关闭" disabled={!win}>
+        <button type="button" className="tb-btn tb-close" onClick={() => { void win?.close().catch((error) => console.error("窗口关闭失败", error)); }} aria-label="关闭" title="关闭" disabled={!win}>
           <CloseIcon />
         </button>
       </div>

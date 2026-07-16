@@ -5,7 +5,6 @@ use crate::{
 use serde_json::{json, Value};
 use std::{
     fs,
-    path::Path,
     time::{Duration, Instant},
 };
 
@@ -19,20 +18,20 @@ pub async fn transcribe_audio(
     if !metadata.is_file() {
         return Err("音频路径不是文件".to_string());
     }
-    if metadata.len() > settings.file_limit_mb as u64 * 1024 * 1024 {
+    let file_limit_mb = u64::try_from(settings.file_limit_mb)
+        .ok()
+        .filter(|value| (1..=2048).contains(value))
+        .ok_or_else(|| "ASR 文件大小限制无效，请重新保存设置".to_string())?;
+    if metadata.len() > file_limit_mb * 1024 * 1024 {
         return Err(format!("音频超过 {} MB 限制", settings.file_limit_mb));
     }
     let job_id = database.start_processing_job("asr", application_id, path)?;
     let started = Instant::now();
     let result = async {
         let api_key = credentials::get_secret("asr_api_key")?;
-        let bytes = fs::read(path).map_err(|error| format!("读取音频失败: {error}"))?;
-        let file_name = Path::new(path)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("audio.bin")
-            .to_string();
-        let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
+        let part = reqwest::multipart::Part::file(path)
+            .await
+            .map_err(|error| format!("读取音频失败: {error}"))?;
         let mut form = reqwest::multipart::Form::new()
             .part("file", part)
             .text("model", settings.model.clone());
@@ -61,11 +60,8 @@ pub async fn transcribe_audio(
             .send()
             .await
             .map_err(|error| format!("语音识别请求失败: {error}"))?;
-        let status = response.status();
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|error| format!("语音识别响应格式错误: {error}"))?;
+        let (status, value) =
+            crate::http::read_json_response(response, 32 * 1024 * 1024, "语音识别").await?;
         if !status.is_success() {
             let message = value
                 .pointer("/error/message")

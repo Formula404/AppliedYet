@@ -47,7 +47,9 @@ export default function AppShell() {
   const [notificationTasks, setNotificationTasks] = useState<DashboardTask[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
+  const notificationRequest = useRef(0);
   const globalToastTimer = useRef<number>();
+  const localToastTimer = useRef<number>();
   const location = useLocation();
   const navigate = useNavigate();
   const { mode, setMode } = useTheme();
@@ -55,6 +57,7 @@ export default function AppShell() {
   const todayLabel = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(currentDate);
 
   const refreshNotifications = async () => {
+    const request = ++notificationRequest.current;
     setNotificationsLoading(true);
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -64,9 +67,9 @@ export default function AppShell() {
         listEmailMessages(),
         getEmailStats(),
       ]);
-      setNotificationTasks(result.tasks); setEmailMessages(messages); setEmailPending(stats.pending);
+      if (request === notificationRequest.current) { setNotificationTasks(result.tasks); setEmailMessages(messages); setEmailPending(stats.pending); }
     } catch { /* 保留上一次成功读取的数据 */ }
-    finally { setNotificationsLoading(false); }
+    finally { if (request === notificationRequest.current) setNotificationsLoading(false); }
   };
 
   useEffect(() => {
@@ -85,6 +88,7 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => startTaskNotificationScheduler(), []);
+  useEffect(() => () => { notificationRequest.current += 1; }, []);
 
   useEffect(() => { void refreshNotifications(); }, [location.pathname]);
 
@@ -98,12 +102,15 @@ export default function AppShell() {
   useEffect(() => {
     if (!hasLocalDatabase) return;
     let timer: number | undefined;
+    let schedulerRevision = 0;
+    let disposed = false;
     const refreshIndex = () => Promise.all([listEmailMessages(), getEmailStats()]).then(([items, stats]) => { setEmailMessages(items); setEmailPending(stats.pending); }).catch(() => undefined);
     void refreshIndex();
     const configureScheduler = () => {
+      const revision = ++schedulerRevision;
       if (timer !== undefined) { window.clearInterval(timer); timer = undefined; }
       void getProviderSettings().then((settings) => {
-        if (!settings.email.enabled) return;
+        if (disposed || revision !== schedulerRevision || !settings.email.enabled) return;
         timer = window.setInterval(() => { void syncEmails().then(refreshIndex).catch(() => undefined); }, Math.max(1, settings.email.pollingMinutes) * 60_000);
       }).catch(() => undefined);
     };
@@ -111,7 +118,7 @@ export default function AppShell() {
     const changed = () => { void refreshIndex(); };
     window.addEventListener("email-index-changed", changed);
     window.addEventListener("email-settings-changed", configureScheduler);
-    return () => { if (timer !== undefined) window.clearInterval(timer); window.removeEventListener("email-index-changed", changed); window.removeEventListener("email-settings-changed", configureScheduler); };
+    return () => { disposed = true; schedulerRevision += 1; if (timer !== undefined) window.clearInterval(timer); window.removeEventListener("email-index-changed", changed); window.removeEventListener("email-settings-changed", configureScheduler); };
   }, []);
 
   useEffect(() => {
@@ -122,7 +129,7 @@ export default function AppShell() {
     loadIdentity();
     window.addEventListener("resume-profile-changed", loadIdentity);
     return () => window.removeEventListener("resume-profile-changed", loadIdentity);
-  }, [location.pathname]);
+  }, []);
 
   useEffect(() => {
     if (applicationsLoading) return;
@@ -141,6 +148,7 @@ export default function AppShell() {
     return () => {
       unsubscribe();
       if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current);
+      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
     };
   }, []);
 
@@ -153,13 +161,18 @@ export default function AppShell() {
       setEmailMessages(items); setEmailPending(stats.pending);
       window.dispatchEvent(new Event("email-index-changed"));
       setToastKind("success"); setToast(`已识别 ${result.recognized} 封招聘邮件，其中 ${result.matched} 封匹配到投递`);
-      window.setTimeout(() => setToast(""), 3200);
-    } catch (reason) { setToastKind("error"); setToast(`邮件检查失败：${String(reason)}`); window.setTimeout(() => setToast(""), 4200); }
+      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
+      localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 3200);
+    } catch (reason) {
+      setToastKind("error"); setToast(`邮件检查失败：${String(reason)}`);
+      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
+      localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 4200);
+    }
     finally { setSyncing(false); }
   };
 
   const results = query ? [
-    ...applications.filter((item) => `${item.company}${item.role}`.toLowerCase().includes(query.toLowerCase())).map((item) => ({ label: item.company, detail: item.role, to: "/applications" })),
+    ...applications.filter((item) => `${item.company}${item.role}`.toLowerCase().includes(query.toLowerCase())).map((item) => ({ label: item.company, detail: item.role, to: `/applications/${item.id}` })),
     ...emailMessages.filter((item) => `${item.company ?? ""}${item.subject}`.toLowerCase().includes(query.toLowerCase())).map((item) => ({ label: item.subject, detail: item.company ?? item.sender, to: "/emails" })),
   ] : [];
   const weekDifference = activity.thisWeekApplications - activity.previousWeekApplications;
@@ -180,7 +193,7 @@ export default function AppShell() {
   const searchContent = query ? <>
     {applicationsLoading && <p>正在读取本地投递…</p>}
     {results.length ? results.map((result,index)=><button key={index} onClick={()=>{navigate(result.to);setSearchOpen(false)}}><Search size={16}/><span><strong>{result.label}</strong><small>{result.detail}</small></span><span>打开</span></button>) : !applicationsLoading && <p>没有找到相关内容</p>}
-  </> : <><h4>快速操作</h4><button onClick={()=>{navigate('/applications?new=1');setSearchOpen(false)}}><Plus size={16}/><span><strong>新增投递</strong><small>记录新的公司与岗位</small></span><kbd>Ctrl N</kbd></button><button onClick={()=>{navigate('/emails');setSearchOpen(false)}}><Inbox size={16}/><span><strong>查看待确认邮件</strong><small>2 封邮件需要处理</small></span></button></>;
+  </> : <><h4>快速操作</h4><button onClick={()=>{navigate('/applications?new=1');setSearchOpen(false)}}><Plus size={16}/><span><strong>新增投递</strong><small>记录新的公司与岗位</small></span><kbd>Ctrl N</kbd></button><button onClick={()=>{navigate('/emails');setSearchOpen(false)}}><Inbox size={16}/><span><strong>查看待确认邮件</strong><small>{emailPending ? `${emailPending} 封邮件需要处理` : "暂无待确认邮件"}</small></span></button></>;
 
   return <div className={`app-shell ${collapsed ? "is-collapsed" : ""}`}>
     <TitleBar />
@@ -194,7 +207,7 @@ export default function AppShell() {
       <header className="topbar">
         <button className="search-trigger" onClick={() => setSearchOpen(true)}><Search size={18}/><span>搜索公司、岗位、邮件、面试记录…</span><kbd>Ctrl K</kbd></button>
         <div className="top-actions">
-          {!hasLocalDatabase && <span className="demo-mode-badge" title="与桌面应用数据库完全隔离，刷新页面可恢复预置数据">演示数据</span>}
+          {!hasLocalDatabase && <span className="demo-mode-badge" title="当前为预览模式，数据仅供预览，刷新可重置">预览模式</span>}
           <span className="today"><CalendarDays size={17}/>{todayLabel}</span>
           <button className="button button--secondary sync-button" disabled={syncing} onClick={sync}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "正在同步…" : "检查邮件"}</button>
           <button className="icon-button" aria-label="主题切换" title={`主题：${mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统"}`} onClick={() => setMode(mode === "light" ? "dark" : mode === "dark" ? "system" : "light")}>{mode === "light" ? <Sun size={18}/> : mode === "dark" ? <Moon size={18}/> : <Monitor size={18}/>}</button>
@@ -204,7 +217,7 @@ export default function AppShell() {
       </header>
       <main key={location.pathname}><Outlet /></main>
     </div>
-    {(toast || globalToast) && (() => { const kind = globalToast?.kind ?? toastKind; return <div className={`toast toast--${kind}`}>{kind === "error" ? <AlertCircle size={17}/> : kind === "info" ? <Info size={17}/> : <Check size={17}/>} {globalToast?.message ?? toast}<button onClick={() => { setToast(""); setGlobalToast(null); }}><X size={15}/></button></div>; })()}
+    {(toast || globalToast) && (() => { const kind = globalToast?.kind ?? toastKind; return <div className={`toast toast--${kind}`}>{kind === "error" ? <AlertCircle size={17}/> : kind === "info" ? <Info size={17}/> : <Check size={17}/>} {globalToast?.message ?? toast}<button onClick={() => { if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current); if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current); localToastTimer.current = undefined; globalToastTimer.current = undefined; setToast(""); setGlobalToast(null); }}><X size={15}/></button></div>; })()}
     {searchOpen && <div className="modal-backdrop" onMouseDown={() => setSearchOpen(false)}><div className="command" onMouseDown={(e)=>e.stopPropagation()}><div className="command-input"><Search size={20}/><input autoFocus value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索公司、岗位、邮件、面试记录…"/><kbd>ESC</kbd></div><div className="command-body">{searchContent}</div></div></div>}
   </div>;
 }

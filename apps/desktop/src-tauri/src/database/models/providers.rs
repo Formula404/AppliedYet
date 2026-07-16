@@ -11,7 +11,6 @@ pub struct AiProviderSettings {
     pub max_output_tokens: i64,
     pub timeout_seconds: i64,
     pub allow_resume: bool,
-    pub allow_email: bool,
     pub allow_transcript: bool,
     pub prompt_before_send: bool,
 }
@@ -26,10 +25,9 @@ impl Default for AiProviderSettings {
             fallback_model: None,
             max_output_tokens: 4096,
             timeout_seconds: 60,
-            allow_resume: true,
-            allow_email: true,
-            allow_transcript: true,
-            prompt_before_send: false,
+            allow_resume: false,
+            allow_transcript: false,
+            prompt_before_send: true,
         }
     }
 }

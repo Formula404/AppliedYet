@@ -1,7 +1,7 @@
 use crate::db::{
-    ApplicationDetail, ApplicationEvent, ApplicationListItem, ApplicationTask,
+    AnalyticsData, ApplicationDetail, ApplicationEvent, ApplicationListItem, ApplicationTask,
     CreateApplicationInput, CreateEventInput, CreateTaskInput, DashboardData, Database,
-    AnalyticsData, DueTaskReminder, UpdateApplicationDetailInput, UpdateTaskInput,
+    DueTaskReminder, UpdateApplicationDetailInput, UpdateTaskInput,
 };
 
 #[tauri::command]

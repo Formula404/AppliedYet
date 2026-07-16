@@ -23,6 +23,9 @@ pub(crate) fn import_interview_experience_link(
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("只支持 http:// 或 https:// 网页".into());
     }
+    if !parsed.username().is_empty() || parsed.password().is_some() || url.chars().count() > 2048 {
+        return Err("链接不能包含账号信息且不能超过 2048 个字符".into());
+    }
     let host = parsed.host_str().unwrap_or("网页");
     db.create_interview_experience_link(&application_id, url, &format!("{host} · 面经帖子"))
 }
@@ -38,7 +41,9 @@ pub(crate) fn create_manual_interview_experience(
     let questions: Vec<String> = questions
         .into_iter()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .filter(|value| {
+            !value.is_empty() && value.chars().count() <= 10_000 && seen.insert(value.clone())
+        })
         .take(100)
         .collect();
     if questions.is_empty() {
@@ -50,6 +55,9 @@ pub(crate) fn create_manual_interview_experience(
     } else {
         title
     };
+    if title.chars().count() > 500 {
+        return Err("面经标题不能超过 500 个字符".into());
+    }
     db.create_manual_interview_experience(&application_id, title, &questions)
 }
 
@@ -101,7 +109,9 @@ pub(crate) fn update_interview_experience_questions(
     let questions: Vec<String> = questions
         .into_iter()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .filter(|value| {
+            !value.is_empty() && value.chars().count() <= 10_000 && seen.insert(value.clone())
+        })
         .take(100)
         .collect();
     db.update_interview_experience_questions(&id, &questions)

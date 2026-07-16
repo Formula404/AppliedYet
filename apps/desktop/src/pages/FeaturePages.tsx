@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { ArrowUp, BarChart3, CircleDollarSign, Clock3, Plus, Star, Target } from "lucide-react";
+import { ArrowUp, BarChart3, CircleDollarSign, Clock3, Plus, Target } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Badge, Card, CardHeader, PageHeader } from "../components/ui";
 import PreparationPage from "./interview/PreparationPage";
 import MockInterviewPage from "./interview/MockInterviewPage";
@@ -7,26 +8,35 @@ import ReviewsPage from "./interview/ReviewsPage";
 import QuestionBankPage from "./interview/QuestionBankPage";
 import SettingsPage from "./SettingsPage";
 import { getAnalytics, type AnalyticsData } from "../services/dashboard";
-import { hasLocalDatabase } from "../services/applications";
+import { useInterviewFlow } from "../hooks/useInterviewFlow";
 
 type Kind = "preparation" | "mock" | "reviews" | "questions" | "offers" | "analytics" | "settings";
 
 const meta: Record<Kind, { title: string; description: string }> = {
-  preparation: { title: "面试准备", description: "按每个流程中的岗位独立管理面经与训练入口" },
-  mock: { title: "模拟面试", description: "组合导入面经与 AI 简历题，自由配置一场岗位模拟" },
-  reviews: { title: "面试复盘", description: "承接真实面试与模拟训练，按岗位持续沉淀复盘" },
-  questions: { title: "个人题库", description: "持续积累高频问题、最佳回答与 STAR 故事" },
-  offers: { title: "Offer 管理", description: "客观比较选择维度，同时保留你的最终决定权" },
-  analytics: { title: "数据分析", description: "从投递转化和面试表现中找到下一步行动" },
-  settings: { title: "设置", description: "管理本地数据、外部服务、隐私权限与备份" },
+  preparation: { title: "面试准备", description: "针对每个岗位准备面经和模拟练习" },
+  mock: { title: "模拟面试", description: "用面经题和简历题自由组合一场模拟练习" },
+  reviews: { title: "面试复盘", description: "回顾每场面试的表现，持续进步" },
+  questions: { title: "个人题库", description: "整理高频问题，打磨你的最佳回答" },
+  offers: { title: "Offer 管理", description: "全面比较 Offer，做出最适合你的选择" },
+  analytics: { title: "数据分析", description: "用数据看清求职进展和优化方向" },
+  settings: { title: "设置", description: "管理简历、外部服务和数据安全偏好" },
 };
 
 export default function FeaturePages({ kind }: { kind: Kind }) {
   const page = meta[kind];
-  return <div className="page page-enter"><PageHeader title={page.title} description={page.description} action={kind==="offers"?<button className="button button--primary"><Plus size={16}/>新建内容</button>:undefined}/>{kind==="preparation"&&<PreparationPage/>}{kind==="mock"&&<MockInterviewPage/>}{kind==="reviews"&&<ReviewsPage/>}{kind==="questions"&&<QuestionBankPage/>}{kind==="offers"&&<Offers/>}{kind==="analytics"&&<Analytics/>}{kind==="settings"&&<SettingsPage/>}</div>;
+  const navigate = useNavigate();
+  return <div className="page page-enter"><PageHeader title={page.title} description={page.description} action={kind==="offers"?<button className="button button--primary" onClick={() => navigate("/applications?new=1")}><Plus size={16}/>新增投递</button>:undefined}/>{kind==="preparation"&&<PreparationPage/>}{kind==="mock"&&<MockInterviewPage/>}{kind==="reviews"&&<ReviewsPage/>}{kind==="questions"&&<QuestionBankPage/>}{kind==="offers"&&<Offers/>}{kind==="analytics"&&<Analytics/>}{kind==="settings"&&<SettingsPage/>}</div>;
 }
 
-function Offers(){return <><div className="offer-summary"><Card><span className="stat-icon teal"><CircleDollarSign/></span><span><small>已收到 Offer</small><strong>3</strong></span></Card><Card><span className="stat-icon orange"><Clock3/></span><span><small>即将截止</small><strong>1</strong></span></Card><Card><span className="stat-icon blue"><Star/></span><span><small>当前首选</small><strong>蚂蚁集团</strong></span></Card></div><Card className="offer-compare"><CardHeader title="Offer 对比" action="调整权重"/><table><thead><tr><th>比较维度</th><th>权重</th><th>蚂蚁集团</th><th>腾讯科技</th><th>字节跳动</th></tr></thead><tbody>{[["综合得分","—","88","84","82"],["岗位匹配","25%","9.2","8.6","8.4"],["成长空间","20%","9.0","8.5","9.1"],["工作强度","15%","7.2","7.8","6.5"],["城市偏好","15%","9.0","8.0","7.5"],["薪资福利","25%","8.6","8.8","9.0"]].map((r,i)=><tr key={r[0]} className={i===0?"score-row":""}>{r.map((v,j)=><td key={j}>{v}</td>)}</tr>)}</tbody></table><p className="data-disclaimer">评分只根据你设置的权重汇总，最终选择由你决定。</p></Card></>}
+function Offers(){
+  const navigate = useNavigate();
+  const { applications } = useInterviewFlow();
+  const active = applications.filter((item) => !item.archived);
+  const offers = active.filter((item) => item.stage.toLowerCase().includes("offer") || item.stage.includes("谈薪"));
+  const negotiating = offers.filter((item) => item.stage.includes("谈薪") || item.nextStep.includes("谈薪")).length;
+  const rate = active.length ? offers.length / active.length * 100 : 0;
+  return <><div className="offer-summary"><Card><span className="stat-icon teal"><CircleDollarSign/></span><span><small>Offer / 谈薪中</small><strong>{offers.length}</strong></span></Card><Card><span className="stat-icon orange"><Clock3/></span><span><small>正在谈薪</small><strong>{negotiating}</strong></span></Card><Card><span className="stat-icon blue"><BarChart3/></span><span><small>Offer 转化率</small><strong>{rate.toFixed(1)}%</strong></span></Card></div><Card className="table-card offer-compare"><CardHeader title="Offer 投递" subtitle="在投递详情更新阶段和下一步行动后会自动同步到这里"/><table><thead><tr><th>公司 / 岗位</th><th>地点</th><th>当前阶段</th><th>优先级</th><th>下一步</th><th>最近更新</th><th>操作</th></tr></thead><tbody>{offers.map((item)=><tr key={item.id} onDoubleClick={() => navigate(`/applications/${item.id}`)}><td><span className="company-logo">{item.companyMark}</span><span><strong>{item.company}</strong><small>{item.role}</small></span></td><td>{item.city}</td><td><Badge tone={item.stageTone}>{item.stage}</Badge></td><td>{item.priority}</td><td>{item.nextStep}<small>{item.nextTime}</small></td><td>{item.updated}</td><td><button className="application-detail-link" onClick={() => navigate(`/applications/${item.id}`)}>查看详情</button></td></tr>)}</tbody></table>{!offers.length&&<div className="question-bank-empty">还没有进入谈薪或 Offer 阶段的投递哦。祝你尽早取得心仪的 Offer！</div>}</Card></>;
+}
 
 const emptyAnalytics: AnalyticsData = { total: 0, thisMonth: 0, previousMonth: 0, assessments: 0, interviews: 0, offers: 0, averageFeedbackDays: null, daily: [], weekly: [], directions: [] };
 const percent = (value: number, total: number) => total ? value / total * 100 : 0;
@@ -36,7 +46,7 @@ function Analytics(){
   const [data,setData]=useState<AnalyticsData>(emptyAnalytics);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState("");
-  useEffect(()=>{setLoading(true);getAnalytics().then(setData).catch((reason)=>setError(String(reason))).finally(()=>setLoading(false))},[]);
+  useEffect(()=>{let disposed=false;setLoading(true);setError("");getAnalytics().then((value)=>{if(!disposed)setData(value)}).catch((reason)=>{if(!disposed)setError(String(reason))}).finally(()=>{if(!disposed)setLoading(false)});return()=>{disposed=true}},[]);
   const monthDelta=data.thisMonth-data.previousMonth;
   const assessmentRate=percent(data.assessments,data.total), interviewRate=percent(data.interviews,data.total), offerRate=percent(data.offers,data.total);
   const stageRates:[[string,number,number],[string,number,number],[string,number,number]]=[["测评进入率",assessmentRate,assessmentRate],["面试进入率",percent(data.interviews,data.assessments),percent(data.interviews,data.assessments)],["Offer率",percent(data.offers,data.interviews),percent(data.offers,data.interviews)]];

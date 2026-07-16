@@ -35,6 +35,8 @@ export const applications: Application[] = [
   { id: "rej4", company: "小红书", companyMark: "红", role: "前端开发工程师", city: "上海", stage: "已拒绝", stageTone: "red", priority: "中", nextStep: "已结束", nextTime: "4 月 28 日", progress: 5, updated: "4 月 28 日", risk: "岗位已招满" },
   { id: "rej5", company: "携程", companyMark: "携", role: "平台开发工程师", city: "上海", stage: "已拒绝", stageTone: "red", priority: "普通", nextStep: "已结束", nextTime: "4 月 20 日", progress: 5, updated: "4 月 20 日" },
   { id: "rej6", company: "哔哩哔哩", companyMark: "B", role: "后端开发工程师", city: "上海", stage: "已拒绝", stageTone: "red", priority: "普通", nextStep: "已结束", nextTime: "4 月 15 日", progress: 5, updated: "4 月 15 日" },
+  { id: "ali", company: "阿里巴巴", companyMark: "阿", role: "后端开发工程师", city: "杭州", stage: "谈薪中", stageTone: "orange", priority: "高", nextStep: "等待薪资方案", nextTime: "今天 18:00", progress: 5, updated: "1 小时前", resumeProfileId: "resume-backend", resumeName: "Java 后端 · 2026 秋招" },
+  { id: "huawei", company: "华为", companyMark: "华", role: "分布式存储工程师", city: "深圳", stage: "已获Offer", stageTone: "teal", priority: "中", nextStep: "确认入职意向", nextTime: "3 天后截止", progress: 5, updated: "昨天", resumeProfileId: "resume-backend", resumeName: "Java 后端 · 2026 秋招" },
 ];
 
 export const mails: MailItem[] = [

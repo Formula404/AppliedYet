@@ -68,15 +68,23 @@ interface InterviewFlowValue {
   updateSessionAnswer: (sessionId: string, questionId: string, answer: string) => Promise<void>;
   updateSessionProgress: (id: string, questionIndex: number) => Promise<void>;
   completeSession: (id: string) => Promise<InterviewSession>;
-  reviewSession: (id: string) => Promise<InterviewSession>;
-  importTranscript: (applicationId: string, transcript: string) => Promise<InterviewSession>;
+  reviewSession: (id: string, confirmAiSend: boolean) => Promise<InterviewSession>;
+  importTranscript: (applicationId: string, transcript: string, confirmAiSend: boolean) => Promise<InterviewSession>;
   deleteSession: (id: string) => Promise<void>;
 }
 
 const InterviewFlowContext = createContext<InterviewFlowValue | null>(null);
+const isTerminalStage = (stage: string) =>
+  stage.includes("拒绝") || stage.includes("人才库") || stage.toLowerCase().includes("offer")
+  || ["流程暂停", "流程结束", "主动放弃"].includes(stage);
 const isInterviewEligible = (application: Application) =>
-  !application.archived && !application.stage.includes("拒绝") && !application.stage.includes("人才库") && !application.stage.toLowerCase().includes("offer");
+  !application.archived && !isTerminalStage(application.stage);
 const makeId = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const requireItem = <T,>(items: readonly T[], index: number, message = "数据项不存在"): T => {
+  const item = items[index];
+  if (item === undefined) throw new Error(message);
+  return item;
+};
 
 const experienceQuestions = [
   "介绍一下你负责过的高并发项目，以及你在其中承担的工作。",
@@ -105,6 +113,9 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
   const stageUpdateQueues = useRef(new Map<string, Promise<void>>());
   const sessionAnswerQueues = useRef(new Map<string, Promise<void>>());
+  const pendingSessionAnswers = useRef(new Map<string, { sessionId: string; questionId: string; answer: string }>());
+  const sessionAnswerErrors = useRef(new Map<string, unknown>());
+  const applicationRefreshId = useRef(0);
   const [selectedApplicationId, setSelectedApplicationId] = useState("ant");
   const [experienceLinks, setExperienceLinks] = useState<ExperienceLink[]>(() => hasLocalDatabase ? [] : [
     { id: "link-ant-1", applicationId: "ant", source: "link", url: "https://www.nowcoder.com/discuss/ant-backend", title: "蚂蚁后端一面经验整理", importedAt: "今天 10:24", status: "已提取", questions: experienceQuestions },
@@ -122,27 +133,30 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     {
       id: "mock-tencent-1", applicationId: "tencent", type: "模拟面试", round: "技术综合模拟", createdAt: "昨天 20:16", duration: "26 分钟", status: "待复盘", currentQuestionIndex: 0,
       questions: [
-        { id: "mock-t-q1", prompt: experienceQuestions[1], source: "面经", answer: "我会优先选择本地事务消息或事务发件箱模式。", score: 72, evaluation: "方向正确，但需要补充失败重试、幂等和对账闭环。" },
-        { id: "mock-t-q2", prompt: resumeQuestions[0], source: "AI 简历题", answer: "原系统模块耦合较高，发布和扩容都比较困难。", score: 68, evaluation: "识别了架构问题，但回答偏抽象，应结合具体故障或指标说明为什么必须重构。" },
-        { id: "mock-t-q3", prompt: resumeQuestions[4], source: "AI 简历题", answer: "我负责核心方案设计、压测以及迁移过程中的问题处理。", score: 79, evaluation: "个人边界表达清楚，可以继续补充每项工作的成果与验证方式。" },
+        { id: "mock-t-q1", prompt: requireItem(experienceQuestions, 1), source: "面经", answer: "我会优先选择本地事务消息或事务发件箱模式。", score: 72, evaluation: "方向正确，但需要补充失败重试、幂等和对账闭环。" },
+        { id: "mock-t-q2", prompt: requireItem(resumeQuestions, 0), source: "AI 简历题", answer: "原系统模块耦合较高，发布和扩容都比较困难。", score: 68, evaluation: "识别了架构问题，但回答偏抽象，应结合具体故障或指标说明为什么必须重构。" },
+        { id: "mock-t-q3", prompt: requireItem(resumeQuestions, 4), source: "AI 简历题", answer: "我负责核心方案设计、压测以及迁移过程中的问题处理。", score: 79, evaluation: "个人边界表达清楚，可以继续补充每项工作的成果与验证方式。" },
       ],
     },
   ]);
 
   const refreshApplications = useCallback(async () => {
     if (!hasLocalDatabase) return;
+    const refreshId = ++applicationRefreshId.current;
     setApplicationsLoading(true);
     try {
       const items = await listApplications();
+      if (refreshId !== applicationRefreshId.current) return;
       setApplications(items);
       const eligible = items.filter(isInterviewEligible);
       setSelectedApplicationId((current) => eligible.some((item) => item.id === current) ? current : (eligible[0]?.id || ""));
       setApplicationsError(null);
     } catch (error) {
+      if (refreshId !== applicationRefreshId.current) return;
       setApplicationsError(String(error));
       throw error;
     } finally {
-      setApplicationsLoading(false);
+      if (refreshId === applicationRefreshId.current) setApplicationsLoading(false);
     }
   }, []);
 
@@ -169,15 +183,15 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     applicationsError,
     refreshApplications,
     archiveApplication: async (id, archived) => {
-      if (archived && selectedApplicationId === id) {
-        const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
-        setSelectedApplicationId(next?.id ?? "");
-      }
       if (hasLocalDatabase) {
         await persistApplicationArchived(id, archived);
         await refreshApplications();
       } else {
         setApplications((current) => current.map((item) => item.id === id ? { ...item, archived } : item));
+        if (archived && selectedApplicationId === id) {
+          const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
+          setSelectedApplicationId(next?.id ?? "");
+        }
       }
     },
     deleteApplication: async (id) => {
@@ -189,11 +203,14 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         if (!target) throw new Error("投递记录不存在");
         if (!target.archived) throw new Error("只能删除已归档的投递");
         setApplications((current) => current.filter((item) => item.id !== id));
+        if (selectedApplicationId === id) {
+          const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
+          setSelectedApplicationId(next?.id ?? "");
+        }
       }
     },
     setSelectedApplicationId,
     updateApplicationStage: async (id, stage, stageTone) => {
-      const previousApplication = applications.find((item) => item.id === id);
       setApplications((current) => current.map((item) => item.id === id ? { ...item, stage, stageTone, updated: "刚刚" } : item));
       if (hasLocalDatabase) {
         // 同一投递的连续拖拽必须按用户操作顺序落库，否则后发请求可能先完成，
@@ -206,22 +223,19 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
           setApplicationsError(null);
         } catch (error) {
           setApplicationsError(String(error));
-          if (previousApplication) {
-            const rollback = previousApplication;
-            setApplications((current) => current.map((item) =>
-              item.id === id && item.stage === stage ? rollback : item));
+          if (stageUpdateQueues.current.get(id) === queuedUpdate) {
+            // No newer drag is waiting: reload the persisted state instead of rolling
+            // back to a closure snapshot that may predate an earlier successful drag.
+            await refreshApplications().catch(() => undefined);
           }
-          // Do not refresh here: a later drag for the same card may already be queued and
-          // persisting. Its optimistic state (and eventual database value) must not be
-          // overwritten by a snapshot taken while that queued write is still in flight.
           throw error;
         } finally {
           if (stageUpdateQueues.current.get(id) === queuedUpdate) stageUpdateQueues.current.delete(id);
         }
       }
-      if ((stage.includes("拒绝") || stage.toLowerCase().includes("offer")) && selectedApplicationId === id) {
+      if (isTerminalStage(stage) && selectedApplicationId === id) {
         const next = applications.find((item) => item.id !== id && isInterviewEligible(item));
-        if (next) setSelectedApplicationId(next.id);
+        setSelectedApplicationId(next?.id ?? "");
       }
     },
     createApplication: async (input) => {
@@ -269,9 +283,14 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       return created;
     },
     analyzeExperienceLink: async (id) => {
-      const analyzed = hasLocalDatabase
-        ? await analyzeInterviewExperienceLink(id)
-        : { ...experienceLinks.find((item) => item.id === id)!, status: "已提取" as const, questions: experienceQuestions };
+      let analyzed: ExperienceLink;
+      if (hasLocalDatabase) {
+        analyzed = await analyzeInterviewExperienceLink(id);
+      } else {
+        const existing = experienceLinks.find((item) => item.id === id);
+        if (!existing) throw new Error("面经来源不存在");
+        analyzed = { ...existing, status: "已提取", questions: experienceQuestions };
+      }
       setExperienceLinks((current) => current.map((item) => item.id === id ? analyzed : item));
       return analyzed;
     },
@@ -282,7 +301,11 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     updateExperienceQuestions: async (id, questions) => {
       const updated = hasLocalDatabase
         ? await updateInterviewExperienceQuestions(id, questions)
-        : { ...experienceLinks.find((item) => item.id === id)!, questions };
+        : (() => {
+            const existing = experienceLinks.find((item) => item.id === id);
+            if (!existing) throw new Error("面经来源不存在");
+            return { ...existing, questions };
+          })();
       setExperienceLinks((current) => current.map((item) => item.id === id ? updated : item));
       return updated;
     },
@@ -295,11 +318,10 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         ...(useBank ? (bankQuestions ?? []).map((prompt) => ({ prompt, source: "个人题库" as const })) : []),
       ];
       if (!pool.length) throw new Error("没有可用于本场模拟的问题");
-      const questionInputs = Array.from({ length: questionCount }, (_, index): CreateInterviewQuestion => ({
-        prompt: pool[index % pool.length].prompt,
-        source: pool[index % pool.length].source,
-        answer: "",
-      }));
+      const questionInputs = Array.from({ length: questionCount }, (_, index): CreateInterviewQuestion => {
+        const selected = requireItem(pool, index % pool.length, "面试题池为空");
+        return { prompt: selected.prompt, source: selected.source, answer: "" };
+      });
       const created = hasLocalDatabase
         ? await createMockInterviewSession(applicationId, questionInputs)
         : { id, applicationId, type: "模拟面试" as const, round: "技术综合模拟", createdAt: "刚刚", duration: "进行中", status: "进行中" as const, currentQuestionIndex: 0, questions: questionInputs.map((question, index) => ({ ...question, id: `${id}-q${index + 1}`, answer: question.answer || "" })) };
@@ -313,9 +335,27 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       }));
       if (hasLocalDatabase) {
         const key = `${sessionId}:${questionId}`;
-        const previous = sessionAnswerQueues.current.get(key) ?? Promise.resolve();
-        const queued = previous.catch(() => undefined).then(() => updateInterviewSessionAnswer(sessionId, questionId, answer));
-        sessionAnswerQueues.current.set(key, queued);
+        pendingSessionAnswers.current.set(key, { sessionId, questionId, answer });
+        let queued = sessionAnswerQueues.current.get(key);
+        if (!queued) {
+          queued = (async () => {
+            while (true) {
+              const pending = pendingSessionAnswers.current.get(key);
+              if (!pending) return;
+              pendingSessionAnswers.current.delete(key);
+              try {
+                await updateInterviewSessionAnswer(pending.sessionId, pending.questionId, pending.answer);
+                sessionAnswerErrors.current.delete(key);
+              } catch (error) {
+                sessionAnswerErrors.current.set(key, error);
+                // If the user typed again while the failed write was in flight, persist
+                // the newest full answer; a successful latest write supersedes the failure.
+                if (!pendingSessionAnswers.current.has(key)) throw error;
+              }
+            }
+          })();
+          sessionAnswerQueues.current.set(key, queued);
+        }
         try { await queued; }
         finally { if (sessionAnswerQueues.current.get(key) === queued) sessionAnswerQueues.current.delete(key); }
       }
@@ -327,10 +367,17 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     completeSession: async (id) => {
       const pending = [...sessionAnswerQueues.current.entries()]
         .filter(([key]) => key.startsWith(`${id}:`))
-        .map(([, promise]) => promise.catch(() => undefined));
+        .map(([, promise]) => promise);
       await Promise.all(pending);
+      const failed = [...sessionAnswerErrors.current.entries()]
+        .find(([key]) => key.startsWith(`${id}:`));
+      if (failed) throw new Error(`仍有答案未保存，请检查数据库后重试：${String(failed[1])}`);
       if (hasLocalDatabase) {
         const completed = await completeInterviewSession(id);
+        const lateFailed = [...sessionAnswerErrors.current.entries()]
+          .find(([key]) => key.startsWith(`${id}:`));
+        for (const key of sessionAnswerErrors.current.keys()) if (key.startsWith(`${id}:`)) sessionAnswerErrors.current.delete(key);
+        if (lateFailed) throw new Error(`仍有答案未保存，请检查数据库后重试：${String(lateFailed[1])}`);
         setSessions((current) => current.map((session) => session.id === id ? completed : session));
         return completed;
       }
@@ -349,27 +396,31 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         })),
       };
       setSessions((current) => current.map((session) => session.id === id ? completed : session));
+      for (const key of sessionAnswerErrors.current.keys()) if (key.startsWith(`${id}:`)) sessionAnswerErrors.current.delete(key);
       return completed;
     },
-    reviewSession: async (id) => {
+    reviewSession: async (id, confirmAiSend) => {
       if (!hasLocalDatabase) {
-        const existing = sessions.find((item) => item.id === id)!;
+        const existing = sessions.find((item) => item.id === id);
+        if (!existing) throw new Error("面试会话不存在");
         const reviewed = { ...existing, status: "复盘完成" as const, reviewSummary: "浏览器演示复盘结果。" };
         setSessions((current) => current.map((item) => item.id === id ? reviewed : item));
         return reviewed;
       }
-      const reviewed = await generateInterviewReview(id);
+      const reviewed = await generateInterviewReview(id, confirmAiSend);
       setSessions((current) => current.map((session) => session.id === id ? reviewed : session));
       return reviewed;
     },
-    importTranscript: async (applicationId, transcript) => {
+    importTranscript: async (applicationId, transcript, confirmAiSend) => {
       if (!hasLocalDatabase) throw new Error("浏览器演示模式不支持导入真实面试材料");
-      const imported = await importInterviewTranscript(applicationId, transcript);
+      const imported = await importInterviewTranscript(applicationId, transcript, confirmAiSend);
       setSessions((current) => [imported, ...current]);
       return imported;
     },
     deleteSession: async (id) => {
       if (hasLocalDatabase) await deleteInterviewSession(id);
+      for (const key of pendingSessionAnswers.current.keys()) if (key.startsWith(`${id}:`)) pendingSessionAnswers.current.delete(key);
+      for (const key of sessionAnswerErrors.current.keys()) if (key.startsWith(`${id}:`)) sessionAnswerErrors.current.delete(key);
       setSessions((current) => current.filter((session) => session.id !== id));
     },
   }), [applications, applicationsError, applicationsLoading, eligibleApplications, experienceLinks, refreshApplications, selectedApplicationId, sessions]);

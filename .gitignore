@@ -9,9 +9,8 @@ target/
 .env.local
 src-tauri/gen/
 **/gen/
-.docs/
-docs/
 marketing/
+md/
 
 # Local temp / config
 F:temp_diff_rust_ts.txt

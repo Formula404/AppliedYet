@@ -36,10 +36,10 @@ export interface AiCallSummary {
 export interface ProviderConnectionResult { ok: boolean; model: string; durationMs: number; message: string }
 
 export const testAiProvider = () => invoke<ProviderConnectionResult>("test_ai_provider");
-export const generateInterviewPreparation = (applicationId: string) => hasLocalDatabase ? invoke<StoredInterviewPreparation>("generate_interview_preparation", { applicationId }) : Promise.resolve(demoPreparation(applicationId));
+export const generateInterviewPreparation = (applicationId: string, confirmAiSend: boolean) => hasLocalDatabase ? invoke<StoredInterviewPreparation>("generate_interview_preparation", { applicationId, confirmAiSend }) : Promise.resolve(demoPreparation(applicationId));
 export const getLatestInterviewPreparation = (applicationId: string) => hasLocalDatabase ? invoke<StoredInterviewPreparation | null>("get_latest_interview_preparation", { applicationId }) : Promise.resolve(demoPreparation(applicationId));
 export const listApplicationAiCalls = (applicationId: string) => hasLocalDatabase ? invoke<AiCallSummary[]>("list_application_ai_calls", { applicationId }) : Promise.resolve(demoAiCalls(applicationId));
-export const generateResumeQuestions = (applicationId: string, count: number) => hasLocalDatabase ? invoke<PredictedQuestion[]>("generate_resume_questions", { applicationId, count }) : Promise.resolve(demoResumeQuestions(count));
+export const generateResumeQuestions = (applicationId: string, count: number, confirmAiSend: boolean) => hasLocalDatabase ? invoke<PredictedQuestion[]>("generate_resume_questions", { applicationId, count, confirmAiSend }) : Promise.resolve(demoResumeQuestions(count));
 
 export interface ProcessingJobResult { id: string; kind: string; status: string; result?: Record<string, unknown>; durationMs?: number }
 export const parseDocument = (path: string, applicationId?: string) => invoke<ProcessingJobResult>("parse_document", { path, applicationId });

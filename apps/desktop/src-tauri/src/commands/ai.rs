@@ -13,8 +13,9 @@ pub(crate) async fn test_ai_provider(
 pub(crate) async fn generate_interview_preparation(
     db: tauri::State<'_, Database>,
     application_id: String,
+    confirm_ai_send: bool,
 ) -> Result<StoredInterviewPreparation, String> {
-    ai::generate_interview_preparation(&db, &application_id).await
+    ai::generate_interview_preparation(&db, &application_id, confirm_ai_send).await
 }
 #[tauri::command]
 pub(crate) fn get_latest_interview_preparation(
@@ -36,6 +37,7 @@ pub(crate) async fn generate_resume_questions(
     db: tauri::State<'_, Database>,
     application_id: String,
     count: i64,
+    confirm_ai_send: bool,
 ) -> Result<Vec<ai::PredictedQuestion>, String> {
-    ai::generate_resume_questions(&db, &application_id, count).await
+    ai::generate_resume_questions(&db, &application_id, count, confirm_ai_send).await
 }

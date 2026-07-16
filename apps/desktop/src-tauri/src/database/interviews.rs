@@ -94,8 +94,25 @@ impl Database {
         status: &str,
         questions: &[CreateInterviewQuestion],
     ) -> Result<InterviewSessionRecord, String> {
-        if questions.is_empty() {
-            return Err("面试会话至少需要一道问题".into());
+        if questions.is_empty() || questions.len() > 30 {
+            return Err("面试会话的问题数量必须在 1 到 30 之间".into());
+        }
+        if !matches!(session_type, "模拟面试" | "真实面试")
+            || !matches!(status, "进行中" | "待复盘" | "复盘完成")
+            || round.trim().is_empty()
+        {
+            return Err("面试会话类型、轮次或状态无效".into());
+        }
+        if questions.iter().any(|question| {
+            question.prompt.trim().is_empty()
+                || question.prompt.chars().count() > 10_000
+                || question.answer.chars().count() > 100_000
+                || !matches!(
+                    question.source.as_str(),
+                    "面经" | "AI 简历题" | "真实面试" | "个人题库"
+                )
+        }) {
+            return Err("面试问题的内容、来源或长度无效".into());
         }
         let id = Uuid::new_v4().to_string();
         let mut connection = self
@@ -103,6 +120,18 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
+        let application_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM applications WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL
+                   AND current_stage NOT LIKE '%拒绝%' AND lower(current_stage) NOT LIKE '%offer%'
+                   AND current_stage NOT LIKE '%人才库%' AND current_stage NOT IN ('流程暂停','流程结束','主动放弃'))",
+                [application_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !application_exists {
+            return Err("只能为使用中的投递创建面试会话".into());
+        }
         transaction
             .execute(
                 "INSERT INTO interview_sessions(id,application_id,session_type,round,status,completed_at)
@@ -112,9 +141,6 @@ impl Database {
             .map_err(db_error)?;
         for (position, question) in questions.iter().enumerate() {
             let prompt = question.prompt.trim();
-            if prompt.is_empty() {
-                continue;
-            }
             transaction
                 .execute(
                     "INSERT INTO interview_session_questions(id,session_id,position,prompt,source,answer)
@@ -141,6 +167,9 @@ impl Database {
         question_id: &str,
         answer: &str,
     ) -> Result<(), String> {
+        if answer.chars().count() > 100_000 {
+            return Err("单题回答不能超过 10 万字".into());
+        }
         let connection = self
             .connection
             .lock()
@@ -148,12 +177,23 @@ impl Database {
         let changed = connection
             .execute(
                 "UPDATE interview_session_questions SET answer=?3,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                 WHERE id=?2 AND session_id=?1",
+                 WHERE id=?2 AND session_id=?1
+                   AND EXISTS(SELECT 1 FROM interview_sessions WHERE id=?1 AND status='进行中')",
                 params![session_id, question_id, answer],
             )
             .map_err(db_error)?;
         if changed == 0 {
-            return Err("面试问题不存在".into());
+            let in_progress: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM interview_sessions WHERE id=?1 AND status='进行中')",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            if in_progress {
+                return Err("面试问题不存在".into());
+            }
+            return Err("面试会话已结束，无法再更新答案".into());
         }
         connection
             .execute(
@@ -173,6 +213,16 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let question_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM interview_session_questions WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if question_index < 0 || question_index >= question_count {
+            return Err("面试问题进度超出范围".into());
+        }
         let changed = connection
             .execute(
                 "UPDATE interview_sessions SET current_question_index=MAX(0,?2),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -305,6 +355,12 @@ impl Database {
         if prompt.is_empty() {
             return Err("问题不能为空".into());
         }
+        if prompt.chars().count() > 10_000
+            || best_answer.chars().count() > 100_000
+            || category.chars().count() > 100
+        {
+            return Err("题库问题、类型或参考回答过长".into());
+        }
         if !matches!(mastery, "待加强" | "练习中" | "熟悉" | "掌握") {
             return Err("掌握程度无效".into());
         }
@@ -317,7 +373,7 @@ impl Database {
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         if id.is_some() {
-            connection
+            let changed = connection
                 .execute(
                     "UPDATE question_bank_items SET normalized_key=?2,prompt=?3,category=?4,best_answer=?5,mastery=?6,
                      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
@@ -327,6 +383,9 @@ impl Database {
                     rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("UNIQUE") => "题库中已存在相同问题".into(),
                     other => db_error(other),
                 })?;
+            if changed == 0 {
+                return Err("题库问题不存在".into());
+            }
         } else {
             connection
                 .execute(

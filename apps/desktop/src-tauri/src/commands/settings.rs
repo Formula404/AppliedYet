@@ -43,15 +43,42 @@ pub(crate) fn set_data_location(
     db: tauri::State<'_, Database>,
     directory: String,
 ) -> Result<String, String> {
-    let path = db.relocate(Path::new(&directory))?;
     let default_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?;
     fs::create_dir_all(&default_dir).map_err(|error| error.to_string())?;
-    fs::write(default_dir.join("data-location.txt"), &path)
-        .map_err(|error| format!("无法保存数据位置: {error}"))?;
-    Ok(path)
+    let pointer = default_dir.join("data-location.txt");
+    db.relocate(Path::new(&directory), |target| {
+        fs::write(&pointer, target.to_string_lossy().as_bytes())
+            .map_err(|error| format!("无法保存数据位置: {error}"))
+    })
+}
+
+#[tauri::command]
+pub(crate) fn backup_database(
+    db: tauri::State<'_, Database>,
+    path: String,
+) -> Result<String, String> {
+    db.backup_to(Path::new(&path))
+}
+
+#[tauri::command]
+pub(crate) fn restore_database(
+    app: tauri::AppHandle,
+    db: tauri::State<'_, Database>,
+    path: String,
+) -> Result<String, String> {
+    let default_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&default_dir).map_err(|error| error.to_string())?;
+    let pointer = default_dir.join("data-location.txt");
+    db.restore_from(Path::new(&path), |target| {
+        fs::write(&pointer, target.to_string_lossy().as_bytes())
+            .map_err(|error| format!("无法保存恢复后的数据位置: {error}"))
+    })
 }
 #[tauri::command]
 pub(crate) fn credential_status(key: String) -> Result<bool, String> {

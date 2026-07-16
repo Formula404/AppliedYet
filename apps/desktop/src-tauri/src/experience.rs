@@ -368,8 +368,8 @@ fn extract_questions(text: &str) -> Vec<String> {
             if looks_like_page_noise(&candidate) {
                 continue;
             }
-            if !looks_like_question(&candidate)
-                && !(interview_section_lines > 0
+            if !(looks_like_question(&candidate)
+                || interview_section_lines > 0
                     && was_numbered
                     && looks_like_short_prompt(&candidate))
             {
@@ -532,9 +532,7 @@ fn looks_like_short_prompt(value: &str) -> bool {
         && !value.ends_with('。')
         && !value.starts_with('（')
         && !value.starts_with('(')
-        && !["面试", "总结", "感受", "流程", "结果", "岗位", "公司介绍"]
-            .iter()
-            .any(|value_to_skip| value == *value_to_skip)
+        && !["面试", "总结", "感受", "流程", "结果", "岗位", "公司介绍"].contains(&value)
 }
 
 fn collapse_whitespace(value: &str) -> String {

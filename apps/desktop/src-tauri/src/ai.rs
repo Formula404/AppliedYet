@@ -129,6 +129,7 @@ pub async fn test_connection(database: &Database) -> Result<ProviderConnectionRe
 pub async fn generate_interview_preparation(
     database: &Database,
     application_id: &str,
+    confirm_ai_send: bool,
 ) -> Result<StoredInterviewPreparation, String> {
     let context = database.get_ai_application_context(application_id)?;
     if context
@@ -143,6 +144,9 @@ pub async fn generate_interview_preparation(
     let settings = database.get_provider_settings()?.ai;
     if context.resume.is_some() && !settings.allow_resume {
         return Err("当前投递关联了简历，请先在 AI 服务设置中允许发送简历内容".to_string());
+    }
+    if context.resume.is_some() && settings.prompt_before_send && !confirm_ai_send {
+        return Err("发送简历前需要用户确认".to_string());
     }
     let api_key = credentials::get_secret("ai_api_key")?;
     let sources = source_snapshot(&context);
@@ -238,6 +242,7 @@ pub async fn generate_resume_questions(
     database: &Database,
     application_id: &str,
     count: i64,
+    confirm_ai_send: bool,
 ) -> Result<Vec<PredictedQuestion>, String> {
     if !(1..=30).contains(&count) {
         return Err("问题数量必须在 1 到 30 之间".to_string());
@@ -249,6 +254,9 @@ pub async fn generate_resume_questions(
     let settings = database.get_provider_settings()?.ai;
     if !settings.allow_resume {
         return Err("请先在 AI 服务设置中允许发送简历内容".to_string());
+    }
+    if settings.prompt_before_send && !confirm_ai_send {
+        return Err("发送简历前需要用户确认".to_string());
     }
     let api_key = credentials::get_secret("ai_api_key")?;
     let sources = source_snapshot(&context);
@@ -317,6 +325,7 @@ pub async fn generate_resume_questions(
 pub async fn generate_interview_review(
     database: &Database,
     session_id: &str,
+    confirm_ai_send: bool,
 ) -> Result<InterviewSessionRecord, String> {
     let session = database.get_interview_session(session_id)?;
     if session.status == "进行中" {
@@ -326,6 +335,8 @@ pub async fn generate_interview_review(
         return Err("本场面试没有可复盘的问题".into());
     }
     let settings = database.get_provider_settings()?.ai;
+    ensure_transcript_sharing_allowed(&settings)?;
+    ensure_sensitive_send_confirmed(&settings, confirm_ai_send)?;
     let api_key = credentials::get_secret("ai_api_key")?;
     let sources = json!([{ "type": "interview_session", "sessionId": session_id, "questionCount": session.questions.len() }]);
     let call_id = database.start_ai_call(
@@ -402,6 +413,7 @@ pub async fn import_interview_transcript(
     database: &Database,
     application_id: &str,
     transcript: &str,
+    confirm_ai_send: bool,
 ) -> Result<InterviewSessionRecord, String> {
     let transcript = transcript.trim();
     if transcript.is_empty() {
@@ -412,6 +424,8 @@ pub async fn import_interview_transcript(
     }
     let context = database.get_ai_application_context(application_id)?;
     let settings = database.get_provider_settings()?.ai;
+    ensure_transcript_sharing_allowed(&settings)?;
+    ensure_sensitive_send_confirmed(&settings, confirm_ai_send)?;
     let api_key = credentials::get_secret("ai_api_key")?;
     let sources =
         json!([{ "type": "interview_transcript", "characters": transcript.chars().count() }]);
@@ -668,7 +682,7 @@ pub(crate) async fn request_text(
                 false,
             )
         }
-        _ => {
+        "responses" => {
             let mut body = json!({
                 "model": model,
                 "input": [
@@ -690,6 +704,7 @@ pub(crate) async fn request_text(
                 false,
             )
         }
+        _ => return Err("AI 接口协议无效，请重新保存设置".into()),
     };
     let request = client.post(endpoint).json(&body);
     let request = if anthropic {
@@ -703,11 +718,7 @@ pub(crate) async fn request_text(
         .send()
         .await
         .map_err(|error| format!("AI 请求失败: {error}"))?;
-    let status = response.status();
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|error| format!("AI 响应不是有效 JSON: {error}"))?;
+    let (status, value) = crate::http::read_json_response(response, 8 * 1024 * 1024, "AI").await?;
     if !status.is_success() {
         let detail = value
             .pointer("/error/message")
@@ -808,6 +819,23 @@ fn interview_schema() -> Value {
 fn elapsed_ms(started: Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
+fn ensure_transcript_sharing_allowed(settings: &AiProviderSettings) -> Result<(), String> {
+    if settings.allow_transcript {
+        Ok(())
+    } else {
+        Err("隐私设置不允许向 AI 服务发送面试转写内容".into())
+    }
+}
+fn ensure_sensitive_send_confirmed(
+    settings: &AiProviderSettings,
+    confirm_ai_send: bool,
+) -> Result<(), String> {
+    if !settings.prompt_before_send || confirm_ai_send {
+        Ok(())
+    } else {
+        Err("发送敏感内容前需要用户确认".into())
+    }
+}
 fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
@@ -836,5 +864,18 @@ mod tests {
     fn chinese_schema_errors_enable_transport_fallback() {
         assert!(schema_transport_is_unsupported("当前服务不支持结构化输出"));
         assert!(schema_transport_is_unsupported("结构化输出不支持此模型"));
+    }
+
+    #[test]
+    fn transcript_privacy_setting_is_enforced_before_network_access() {
+        let mut settings = AiProviderSettings {
+            allow_transcript: false,
+            ..AiProviderSettings::default()
+        };
+        assert!(ensure_transcript_sharing_allowed(&settings).is_err());
+        settings.allow_transcript = true;
+        assert!(ensure_transcript_sharing_allowed(&settings).is_ok());
+        assert!(ensure_sensitive_send_confirmed(&settings, false).is_err());
+        assert!(ensure_sensitive_send_confirmed(&settings, true).is_ok());
     }
 }

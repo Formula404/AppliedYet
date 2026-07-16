@@ -52,6 +52,11 @@ export const importResumeProfile = (path: string, confirmAiSend = false) => invo
 export const updateResumeProfile = (id: string, input: UpdateResumeProfileInput) => hasLocalDatabase ? invoke<ResumeProfile>("update_resume_profile", { id, input }) : replaceDemoResume(id, input);
 export const setPrimaryResumeProfile = (id: string) => hasLocalDatabase ? invoke<void>("set_primary_resume_profile", { id }) : primaryDemoResume(id);
 export const deleteResumeProfile = (id: string) => hasLocalDatabase ? invoke<void>("delete_resume_profile", { id }) : deleteDemoResume(id);
-export const duplicateResumeProfile = async (id: string) => hasLocalDatabase ? invoke<ResumeProfile>("duplicate_resume_profile", { id }) : createDemoResume(`${(await listDemoResumes()).find((item) => item.id === id)?.name || "简历"} · 副本`, (await listDemoResumes()).find((item) => item.id === id));
+export const duplicateResumeProfile = async (id: string) => {
+  if (hasLocalDatabase) return invoke<ResumeProfile>("duplicate_resume_profile", { id });
+  const source = (await listDemoResumes()).find((item) => item.id === id);
+  if (!source) throw new Error("简历不存在");
+  return createDemoResume(`${source.name} · 副本`, source);
+};
 export const setResumeProfileArchived = (id: string, archived: boolean) => hasLocalDatabase ? invoke<void>("set_resume_profile_archived", { id, archived }) : replaceDemoResume(id, { archivedAt: archived ? new Date().toISOString() : undefined }).then(() => undefined);
 export const createBlankResumeProfile = (name: string) => hasLocalDatabase ? invoke<ResumeProfile>("create_blank_resume_profile", { name }) : createDemoResume(name);

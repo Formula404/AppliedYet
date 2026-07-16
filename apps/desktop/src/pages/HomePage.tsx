@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, Check, ChevronLeft, ChevronRight, CircleDot } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Badge, Card, CardHeader } from "../components/ui";
@@ -36,6 +36,7 @@ export default function HomePage() {
   const [data, setData] = useState<DashboardData>(emptyDashboard);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const loadRequest = useRef(0);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -46,21 +47,24 @@ export default function HomePage() {
   }, []);
 
   const load = useCallback(async () => {
+    const request = ++loadRequest.current;
     setLoading(true);
     setError("");
     const monthStart = new Date(month.getFullYear(), month.getMonth(), 1);
     const monthEnd = new Date(month.getFullYear(), month.getMonth() + 1, 1);
     const todayEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
     try {
-      setData(await getDashboard(monthStart.toISOString(), monthEnd.toISOString(), today.toISOString(), todayEnd.toISOString()));
+      const result = await getDashboard(monthStart.toISOString(), monthEnd.toISOString(), today.toISOString(), todayEnd.toISOString());
+      if (request === loadRequest.current) setData(result);
     } catch (reason) {
-      setError(String(reason));
+      if (request === loadRequest.current) setError(String(reason));
     } finally {
-      setLoading(false);
+      if (request === loadRequest.current) setLoading(false);
     }
   }, [month, today]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => () => { loadRequest.current += 1; }, []);
 
   const cells = useMemo(() => buildCalendar(month), [month]);
   const eventsByDay = useMemo(() => data.events.reduce<Record<string, DashboardEvent[]>>((result, item) => {
@@ -98,7 +102,7 @@ export default function HomePage() {
   };
 
   return <div className="calendar-page page-enter">
-    <div className="calendar-page-heading"><div><h1>日历</h1><p>集中查看待办任务、投递创建与流程变更</p></div>{loading && <span className="dashboard-loading">正在同步本地数据…</span>}</div>
+    <div className="calendar-page-heading"><div><h1>日历</h1><p>一眼看清今天的安排和求职进展</p></div>{loading && <span className="dashboard-loading">正在同步本地数据…</span>}</div>
     {error && <div className="detail-error">首页数据读取失败：{error}</div>}
     <div className="home-kpis">{kpis.map(([label, value, tone, note]) => <button key={label} className={`home-kpi home-kpi--${tone}`} onClick={() => navigate("/applications")}><span>{label}</span><strong>{value}</strong><small>{note}</small></button>)}</div>
     <div className="calendar-layout">
@@ -107,7 +111,8 @@ export default function HomePage() {
         <div className="calendar-grid calendar-weekdays">{weekdays.map((day) => <span key={day}>{day}</span>)}</div>
         <div className="calendar-grid calendar-days" style={{ gridTemplateRows: `repeat(${cells.length / 7}, minmax(77px, 1fr))` }}>{cells.map(({ date, muted }) => {
           const key = dateKey(date); const isToday = key === dateKey(today); const selected = key === dateKey(selectedDate);
-          return <button key={key} className={`${muted ? "muted" : ""} ${isToday ? "is-today" : ""} ${selected ? "selected" : ""}`} onClick={() => { setSelectedDate(date); if (muted) setMonth(new Date(date.getFullYear(), date.getMonth(), 1)); }}><span>{date.getDate()}</span>{eventsByDay[key]?.slice(0, 3).map((event) => <em className={`event event--${event.tone} event--type-${event.kind}`} key={event.id}>{event.title} · {event.company}</em>)}{(eventsByDay[key]?.length || 0) > 3 && <small className="calendar-more">+{eventsByDay[key].length - 3}</small>}</button>;
+          const dayEvents = eventsByDay[key] ?? [];
+          return <button key={key} className={`${muted ? "muted" : ""} ${isToday ? "is-today" : ""} ${selected ? "selected" : ""}`} onClick={() => { setSelectedDate(date); if (muted) setMonth(new Date(date.getFullYear(), date.getMonth(), 1)); }}><span>{date.getDate()}</span>{dayEvents.slice(0, 3).map((event) => <em className={`event event--${event.tone} event--type-${event.kind}`} key={event.id}>{event.title} · {event.company}</em>)}{dayEvents.length > 3 && <small className="calendar-more">+{dayEvents.length - 3}</small>}</button>;
         })}</div>
         <div className="calendar-legend calendar-type-legend"><span><i className="calendar-type-mark calendar-type-mark--task"/>待办任务</span><span><i className="calendar-type-mark calendar-type-mark--milestone"/>流程节点</span><span><i className="calendar-type-mark calendar-type-mark--next"/>下一步安排</span></div>
       </Card>

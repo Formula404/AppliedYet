@@ -1,5 +1,10 @@
 const SERVICE_NAME: &str = "com.appliedyet.desktop";
-const ALLOWED_KEYS: &[&str] = &["ai_api_key", "asr_api_key", "email_password", "email_oauth_refresh_token"];
+const ALLOWED_KEYS: &[&str] = &[
+    "ai_api_key",
+    "asr_api_key",
+    "email_password",
+    "email_oauth_refresh_token",
+];
 
 fn entry(key: &str) -> Result<keyring::Entry, String> {
     if !ALLOWED_KEYS.contains(&key) {
@@ -12,6 +17,9 @@ pub fn set_secret(key: &str, secret: &str) -> Result<(), String> {
     let secret = secret.trim();
     if secret.is_empty() {
         return Err("凭据不能为空".to_string());
+    }
+    if secret.len() > 16 * 1024 {
+        return Err("凭据长度超过 16 KB 限制".to_string());
     }
     entry(key)?
         .set_password(secret)

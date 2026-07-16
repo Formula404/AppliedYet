@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { hasLocalDatabase } from "./applications";
 
 export interface AiProviderSettings {
   provider: string;
@@ -6,8 +7,9 @@ export interface AiProviderSettings {
   baseUrl: string;
   model: string;
   fallbackModel?: string;
+  maxOutputTokens: number;
+  timeoutSeconds: number;
   allowResume: boolean;
-  allowEmail: boolean;
   allowTranscript: boolean;
   promptBeforeSend: boolean;
 }
@@ -51,10 +53,11 @@ export const defaultProviderSettings: ProviderSettings = {
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4.1-mini",
     fallbackModel: "",
-    allowResume: true,
-    allowEmail: true,
-    allowTranscript: true,
-    promptBeforeSend: false,
+    maxOutputTokens: 4096,
+    timeoutSeconds: 60,
+    allowResume: false,
+    allowTranscript: false,
+    promptBeforeSend: true,
   },
   asr: {
     provider: "OpenAI 兼容接口",
@@ -74,6 +77,12 @@ export function getProviderSettings() {
   return invoke<ProviderSettings>("get_provider_settings");
 }
 
+export async function requestAiSendConfirmation(message: string) {
+  if (!hasLocalDatabase) return true;
+  const { ai } = await getProviderSettings();
+  return !ai.promptBeforeSend || window.confirm(message);
+}
+
 export function saveAiProviderSettings(settings: AiProviderSettings) {
   return invoke<void>("save_ai_provider_settings", { settings });
 }
@@ -88,6 +97,8 @@ export function saveEmailSettings(settings: EmailSettings) {
 
 export const getDataLocation = () => invoke<string>("get_data_location");
 export const setDataLocation = (directory: string) => invoke<string>("set_data_location", { directory });
+export const backupDatabase = (path: string) => invoke<string>("backup_database", { path });
+export const restoreDatabase = (path: string) => invoke<string>("restore_database", { path });
 
 export function getCredentialStatus(key: "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token") {
   return invoke<boolean>("credential_status", { key });

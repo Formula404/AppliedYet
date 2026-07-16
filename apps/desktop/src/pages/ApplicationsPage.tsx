@@ -18,7 +18,9 @@ const columns = [
   { label: "等待结果", match: ["等待"] },
   { label: "Offer", match: ["Offer", "谈薪"] },
   { label: "进入人才库", match: ["人才库"] },
+  { label: "其他状态", match: [] },
 ];
+const boardColumnForStage = (stage: string) => columns.find((column) => column.match.some((keyword) => stage.includes(keyword)))?.label ?? "其他状态";
 const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const localDateTime = (value: string) => {
   const date = new Date(value);
@@ -163,7 +165,7 @@ export default function ApplicationsPage() {
 
   return (
     <div className="page page-enter">
-      <PageHeader title="我的投递" description="集中管理岗位状态、下一步行动与完整流程记录" action={<div className="page-header-actions"><button className="button button--secondary" disabled={exporting || applicationsLoading} onClick={exportExcel}><Download size={16} />{exporting ? "导出中…" : "导出 Excel"}</button><button className="button button--primary" onClick={() => setShowNew(true)}><Plus size={16} />新增投递</button></div>} />
+      <PageHeader title="我的投递" description="记录所有投递，随时掌握每个岗位的进展" action={<div className="page-header-actions"><button className="button button--secondary" disabled={exporting || applicationsLoading} onClick={exportExcel}><Download size={16} />{exporting ? "导出中…" : "导出 Excel"}</button><button className="button button--primary" onClick={() => setShowNew(true)}><Plus size={16} />新增投递</button></div>} />
       <div className="toolbar">
         <div className="inline-search"><Search size={16} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="搜索公司或岗位" /></div>
         <label className="filter-select"><Filter size={16} /><select aria-label="按状态筛选" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">全部状态</option>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label>
@@ -180,7 +182,7 @@ export default function ApplicationsPage() {
         <DndContext onDragEnd={handleDragEnd}>
           <div className="kanban">
             {columns.map(col => {
-              const items = filtered.filter(a => col.match.some(m => a.stage.includes(m)));
+              const items = filtered.filter((app) => !app.stage.includes("拒绝") && boardColumnForStage(app.stage) === col.label);
               return (
                 <DroppableColumn key={col.label} col={col}>
                   <div className="kanban-title">
@@ -197,10 +199,10 @@ export default function ApplicationsPage() {
           <RejectedDroppable>
             <div className="rejected-header">
               <h3>已拒绝</h3>
-              <b>{filtered.filter(a => a.stage === "已拒绝").length}</b>
+              <b>{filtered.filter(a => a.stage.includes("拒绝")).length}</b>
             </div>
             <div className="rejected-list">
-              {filtered.filter(a => a.stage === "已拒绝").map(app => (
+              {filtered.filter(a => a.stage.includes("拒绝")).map(app => (
                 <RejectedItem key={app.id} app={app} onOpen={() => navigate(`/applications/${app.id}`)} />
               ))}
             </div>
@@ -291,7 +293,7 @@ export default function ApplicationsPage() {
                 <label><span>使用简历</span><select key={resumes.map((item) => item.id).join("|")} name="resumeProfileId" defaultValue={resumes.find((item) => item.isPrimary)?.id ?? ""}><option value="">暂不关联</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>{resume.name}{resume.targetDirection ? ` · ${resume.targetDirection}` : ""}{resume.isPrimary ? "（默认）" : ""}</option>)}</select></label>
                 <label><span>公司官网</span><input name="website" type="url" placeholder="https://" /></label>
                 <label className="full"><span>招聘链接</span><input name="sourceUrl" type="url" placeholder="https://" /></label>
-                <label className="full"><span>JD 原文</span><textarea name="jdRaw" rows={5} placeholder="粘贴岗位描述，后续将用于岗位准备与问题预测" /></label>
+                <label className="full"><span>JD 原文</span><textarea name="jdRaw" rows={5} placeholder="粘贴岗位描述，方便 AI 帮你做面试准备" /></label>
                 <label className="full"><span>公司备注</span><textarea name="companyNotes" rows={3} placeholder="记录团队、业务或沟通信息" /></label>
               </div>
               <div className="dialog-actions">

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -7,14 +7,14 @@ use std::{
 };
 use uuid::Uuid;
 
-mod migrations;
 mod email;
 mod interviews;
+mod migrations;
 pub mod models;
+pub use email::{EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult};
 pub use interviews::{
     CreateInterviewQuestion, InterviewQuestionReview, InterviewSessionRecord, QuestionBankItem,
 };
-pub use email::{EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult};
 use migrations::MIGRATIONS;
 pub use models::{
     AiApplicationContext, AiCallSummary, AiProviderSettings, AsrProviderSettings,
@@ -367,7 +367,10 @@ impl Database {
             .into_owned())
     }
 
-    pub fn relocate(&self, directory: &Path) -> Result<String, String> {
+    pub fn relocate<F>(&self, directory: &Path, persist_location: F) -> Result<String, String>
+    where
+        F: FnOnce(&Path) -> Result<(), String>,
+    {
         fs::create_dir_all(directory).map_err(|error| format!("无法创建数据目录: {error}"))?;
         let target = directory.join("applied-yet.sqlite3");
         // Keep both guards for the complete checkpoint/copy/swap operation. Every database
@@ -383,6 +386,7 @@ impl Database {
             .map_err(|_| "数据路径锁已损坏".to_string())?;
         let current = path.clone();
         if current == target {
+            persist_location(&target)?;
             return Ok(target.to_string_lossy().into_owned());
         }
         if target.exists() {
@@ -391,12 +395,119 @@ impl Database {
         connection
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
             .map_err(db_error)?;
-        fs::copy(&current, &target).map_err(|error| format!("移动数据失败: {error}"))?;
-        let replacement = Database::open(&target)?;
-        let replacement_connection = replacement
+        fs::copy(&current, &target).map_err(|error| {
+            remove_database_files(&target);
+            format!("移动数据失败: {error}")
+        })?;
+        let replacement = match Database::open(&target) {
+            Ok(database) => database,
+            Err(error) => {
+                remove_database_files(&target);
+                return Err(error);
+            }
+        };
+        let replacement_connection = match replacement.connection.into_inner() {
+            Ok(connection) => connection,
+            Err(_) => {
+                remove_database_files(&target);
+                return Err("新数据库连接锁已损坏".to_string());
+            }
+        };
+        if let Err(error) = persist_location(&target) {
+            drop(replacement_connection);
+            remove_database_files(&target);
+            return Err(error);
+        }
+        *connection = replacement_connection;
+        *path = target.clone();
+        Ok(target.to_string_lossy().into_owned())
+    }
+
+    pub fn backup_to(&self, target: &Path) -> Result<String, String> {
+        let parent = target
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| "备份路径无效".to_string())?;
+        fs::create_dir_all(parent).map_err(|error| format!("无法创建备份目录: {error}"))?;
+        let connection = self
             .connection
-            .into_inner()
-            .map_err(|_| "新数据库连接锁已损坏".to_string())?;
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let path = self
+            .path
+            .lock()
+            .map_err(|_| "数据路径锁已损坏".to_string())?;
+        if *path == target {
+            return Err("不能用当前数据库文件覆盖自身".into());
+        }
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(db_error)?;
+        let temporary = parent.join(format!(".applied-yet-backup-{}.tmp", Uuid::new_v4()));
+        if let Err(error) = fs::copy(path.as_path(), &temporary) {
+            return Err(format!("创建备份失败: {error}"));
+        }
+        if let Err(error) = validate_database_file(&temporary) {
+            remove_database_files(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temporary, target) {
+            remove_database_files(&temporary);
+            return Err(format!("保存备份失败: {error}"));
+        }
+        Ok(target.to_string_lossy().into_owned())
+    }
+
+    pub fn restore_from<F>(&self, source: &Path, persist_location: F) -> Result<String, String>
+    where
+        F: FnOnce(&Path) -> Result<(), String>,
+    {
+        if !source.is_file() {
+            return Err("所选备份文件不存在".into());
+        }
+        validate_database_file(source)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut path = self
+            .path
+            .lock()
+            .map_err(|_| "数据路径锁已损坏".to_string())?;
+        let source =
+            fs::canonicalize(source).map_err(|error| format!("无法读取备份路径: {error}"))?;
+        let current = fs::canonicalize(path.as_path()).unwrap_or_else(|_| path.clone());
+        if source == current {
+            return Err("不能从当前正在使用的数据库恢复".into());
+        }
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(db_error)?;
+        let directory = path
+            .parent()
+            .filter(|value| !value.as_os_str().is_empty())
+            .ok_or_else(|| "当前数据目录无效".to_string())?;
+        let target = directory.join(format!("applied-yet-restored-{}.sqlite3", Uuid::new_v4()));
+        fs::copy(&source, &target).map_err(|error| format!("复制备份失败: {error}"))?;
+        let replacement = match Database::open(&target) {
+            Ok(database) => database,
+            Err(error) => {
+                remove_database_files(&target);
+                return Err(format!("无法恢复备份: {error}"));
+            }
+        };
+        let replacement_connection = match replacement.connection.into_inner() {
+            Ok(value) => value,
+            Err(_) => {
+                remove_database_files(&target);
+                return Err("恢复后的数据库连接锁已损坏".to_string());
+            }
+        };
+        if let Err(error) = persist_location(&target) {
+            drop(replacement_connection);
+            remove_database_files(&target);
+            return Err(error);
+        }
         *connection = replacement_connection;
         *path = target.clone();
         Ok(target.to_string_lossy().into_owned())
@@ -679,9 +790,9 @@ impl Database {
             ).map_err(db_error)?;
             let rows = statement
                 .query_map([], |row| {
-                    Ok((0..16)
+                    (0..16)
                         .map(|index| row.get::<_, String>(index))
-                        .collect::<Result<Vec<_>, _>>()?)
+                        .collect::<Result<Vec<_>, _>>()
                 })
                 .map_err(db_error)?;
             for row in rows {
@@ -702,8 +813,10 @@ impl Database {
     ) -> Result<ApplicationListItem, String> {
         let company_name = required(input.company_name, "公司名称")?;
         let position_title = required(input.position_title, "岗位名称")?;
+        let website = clean_external_url(input.website, "公司官网")?;
+        let source_url = clean_external_url(input.source_url, "招聘链接")?;
         let priority = input.priority.unwrap_or(2);
-        let applied_at = clean(input.applied_at);
+        let applied_at = clean_date(input.applied_at, "投递日期")?;
         if !(1..=3).contains(&priority) {
             return Err("优先级必须在 1 到 3 之间".to_string());
         }
@@ -730,13 +843,13 @@ impl Database {
             .map_err(db_error)?;
         transaction.execute(
             "UPDATE companies SET short_name=COALESCE(?2,short_name),industry=COALESCE(?3,industry),company_type=COALESCE(?4,company_type),website=COALESCE(?5,website),notes=COALESCE(?6,notes),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
-            params![company_id, clean(input.company_short_name), clean(input.industry), clean(input.company_type), clean(input.website), clean(input.company_notes)],
+            params![company_id, clean(input.company_short_name), clean(input.industry), clean(input.company_type), website, clean(input.company_notes)],
         ).map_err(db_error)?;
 
         let position_id = Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT INTO positions(id, company_id, title, department, location, recruitment_type, job_code, source_url, jd_raw) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![position_id, company_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), clean(input.source_url), clean(input.jd_raw)],
+            params![position_id, company_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), source_url, clean(input.jd_raw)],
         ).map_err(db_error)?;
 
         let resume_profile_id = match clean(input.resume_profile_id) {
@@ -912,7 +1025,10 @@ impl Database {
         let company_name = required(input.company_name, "公司名称")?;
         let position_title = required(input.position_title, "岗位名称")?;
         let current_stage = required(input.current_stage, "当前阶段")?;
-        let applied_at = clean(input.applied_at);
+        let website = clean_external_url(input.website, "公司官网")?;
+        let source_url = clean_external_url(input.source_url, "招聘链接")?;
+        let applied_at = clean_date(input.applied_at, "投递日期")?;
+        let next_action_due_at = clean_timestamp(input.next_action_due_at, "下一步时间")?;
         if !(1..=3).contains(&input.priority) {
             return Err("优先级必须在 1 到 3 之间".to_string());
         }
@@ -960,17 +1076,17 @@ impl Database {
 
         transaction.execute(
             "UPDATE companies SET name = ?2, short_name = ?3, industry = ?4, company_type = ?5, website = ?6, notes = ?7, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![company_id, company_name, clean(input.company_short_name), clean(input.industry), clean(input.company_type), clean(input.website), clean(input.company_notes)],
+            params![company_id, company_name, clean(input.company_short_name), clean(input.industry), clean(input.company_type), website, clean(input.company_notes)],
         ).map_err(db_error)?;
         transaction.execute(
             "UPDATE positions SET title = ?2, department = ?3, location = ?4, recruitment_type = ?5, job_code = ?6, source_url = ?7, jd_raw = ?8, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![position_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), clean(input.source_url), clean(input.jd_raw)],
+            params![position_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), source_url, clean(input.jd_raw)],
         ).map_err(db_error)?;
         transaction.execute(
             "UPDATE applications SET applied_at = ?2, channel = ?3, priority = ?4, current_stage = ?5, next_action = ?6, next_action_due_at = ?7, resume_profile_id=?8,
                     status_updated_at = CASE WHEN current_stage <> ?5 THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE status_updated_at END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![id, applied_at.clone(), clean(input.channel), input.priority, current_stage, clean(input.next_action), clean(input.next_action_due_at), resume_profile_id],
+            params![id, applied_at.clone(), clean(input.channel), input.priority, current_stage, clean(input.next_action), next_action_due_at, resume_profile_id],
         ).map_err(db_error)?;
 
         if applied_before != applied_at {
@@ -1044,6 +1160,9 @@ impl Database {
         if !(1..=3).contains(&input.priority) {
             return Err("优先级必须在 1 到 3 之间".to_string());
         }
+        let due_at = clean_timestamp(input.due_at, "任务截止时间")?;
+        let remind_at = clean_timestamp(input.remind_at, "任务提醒时间")?;
+        validate_task_times(due_at.as_deref(), remind_at.as_deref())?;
         let task_id = Uuid::new_v4().to_string();
         let mut connection = self
             .connection
@@ -1053,7 +1172,7 @@ impl Database {
         transaction.execute(
             "INSERT INTO tasks(id, application_id, title, description, priority, due_at, remind_at, application_stage, source_type)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'manual')",
-            params![task_id, application_id, title, clean(input.description), input.priority, clean(input.due_at), clean(input.remind_at), clean(input.application_stage)],
+            params![task_id, application_id, title, clean(input.description), input.priority, due_at, remind_at, clean(input.application_stage)],
         ).map_err(db_error)?;
         transaction.execute(
             "INSERT INTO application_events(id, application_id, event_type, title, content, source_type, source_id)
@@ -1116,6 +1235,9 @@ impl Database {
         if !(1..=3).contains(&input.priority) {
             return Err("优先级必须在 1 到 3 之间".to_string());
         }
+        let due_at = clean_timestamp(input.due_at, "任务截止时间")?;
+        let remind_at = clean_timestamp(input.remind_at, "任务提醒时间")?;
+        validate_task_times(due_at.as_deref(), remind_at.as_deref())?;
         let mut connection = self
             .connection
             .lock()
@@ -1134,7 +1256,7 @@ impl Database {
             "UPDATE tasks SET title = ?2, description = ?3, priority = ?4, due_at = ?5, remind_at = ?6, application_stage = ?7,
                     reminder_notified_at = CASE WHEN COALESCE(remind_at, '') <> COALESCE(?6, '') THEN NULL ELSE reminder_notified_at END,
                     updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
-            params![task_id, title, clean(input.description), input.priority, clean(input.due_at), clean(input.remind_at), clean(input.application_stage)],
+            params![task_id, title, clean(input.description), input.priority, due_at, remind_at, clean(input.application_stage)],
         ).map_err(db_error)?;
         transaction.execute(
             "INSERT INTO application_events(id, application_id, event_type, title, content, source_type, source_id)
@@ -1293,7 +1415,8 @@ impl Database {
         event_id: &str,
         happened_at: &str,
     ) -> Result<ApplicationDetail, String> {
-        let happened_at = required(happened_at.to_string(), "发生时间")?;
+        let happened_at = clean_timestamp(Some(happened_at.to_string()), "发生时间")?
+            .ok_or_else(|| "发生时间不能为空".to_string())?;
         let mut connection = self
             .connection
             .lock()
@@ -1389,6 +1512,8 @@ impl Database {
              FROM tasks t JOIN applications a ON a.id = t.application_id JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
              WHERE t.deleted_at IS NULL AND t.status IN ('todo', 'doing') AND t.remind_at IS NOT NULL
                AND t.remind_at <= ?1 AND t.reminder_notified_at IS NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL
+               AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%'
+               AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
              ORDER BY t.remind_at LIMIT 20",
         ).map_err(db_error)?;
         let rows = statement
@@ -1490,11 +1615,27 @@ impl Database {
 
     pub fn save_ai_settings(&self, settings: AiProviderSettings) -> Result<(), String> {
         let base_url = settings.base_url.trim();
+        if settings.provider.chars().count() > 200
+            || settings.model.chars().count() > 500
+            || settings
+                .fallback_model
+                .as_deref()
+                .is_some_and(|value| value.chars().count() > 500)
+            || base_url.chars().count() > 2048
+        {
+            return Err("AI 服务商、模型或 API 地址过长".to_string());
+        }
         if !is_allowed_provider_url(base_url) {
             return Err("API 地址必须使用 HTTPS；仅本机服务允许 HTTP".to_string());
         }
         if settings.model.trim().is_empty() {
             return Err("模型名称不能为空".to_string());
+        }
+        if !matches!(
+            settings.protocol.as_str(),
+            "responses" | "chat" | "anthropic"
+        ) {
+            return Err("AI 接口协议无效".to_string());
         }
         if !(256..=32768).contains(&settings.max_output_tokens) {
             return Err("最大输出必须在 256 到 32768 Token 之间".to_string());
@@ -1506,6 +1647,13 @@ impl Database {
     }
 
     pub fn save_asr_settings(&self, settings: AsrProviderSettings) -> Result<(), String> {
+        if settings.provider.chars().count() > 200
+            || settings.model.chars().count() > 500
+            || settings.language.chars().count() > 100
+            || settings.base_url.chars().count() > 2048
+        {
+            return Err("ASR 服务商、模型、语言或 API 地址过长".to_string());
+        }
         if settings.provider.trim().is_empty()
             || settings.language.trim().is_empty()
             || settings.model.trim().is_empty()
@@ -1525,6 +1673,14 @@ impl Database {
     }
 
     pub fn save_email_settings(&self, settings: EmailSettings) -> Result<(), String> {
+        if settings.provider.chars().count() > 200
+            || settings.email_address.chars().count() > 320
+            || settings.username.chars().count() > 500
+            || settings.oauth_client_id.chars().count() > 500
+            || settings.oauth_tenant.chars().count() > 500
+        {
+            return Err("邮箱设置中的文本字段过长".into());
+        }
         if settings.enabled
             && (settings.email_address.trim().is_empty()
                 || settings.imap_host.trim().is_empty()
@@ -1541,8 +1697,18 @@ impl Database {
         if !matches!(settings.auth_method.as_str(), "password" | "oauth2") {
             return Err("邮箱认证方式无效".into());
         }
-        if settings.auth_method == "oauth2" && settings.oauth_client_id.trim().is_empty() {
+        if settings.enabled
+            && settings.auth_method == "oauth2"
+            && settings.oauth_client_id.trim().is_empty()
+        {
             return Err("使用 OAuth2 前请填写桌面应用 Client ID".into());
+        }
+        let host = settings.imap_host.trim();
+        if !host.is_empty() && !valid_network_host(host) {
+            return Err("IMAP 服务器地址无效".into());
+        }
+        if !host.is_empty() && !settings.use_tls && !is_local_network_host(host) {
+            return Err("远程 IMAP 连接必须启用 TLS，避免凭据和邮件明文传输".into());
         }
         let value = serde_json::to_string(&settings).map_err(json_error)?;
         let connection = self
@@ -1575,6 +1741,7 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        ensure_active_application(&connection, application_id)?;
         connection
             .query_row(
                 "SELECT a.id, c.name, p.title, p.department, p.location, a.current_stage,
@@ -1657,8 +1824,11 @@ impl Database {
         let rows = statement
             .query_map([application_id], experience_source_row)
             .map_err(db_error)?;
-        rows.map(|row| row.map_err(db_error).and_then(experience_source_from_values))
-            .collect()
+        rows.map(|row| {
+            row.map_err(db_error)
+                .and_then(experience_source_from_values)
+        })
+        .collect()
     }
 
     pub fn get_interview_experience_source(
@@ -1694,6 +1864,7 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        ensure_active_application(&connection, application_id)?;
         connection
             .execute(
                 "INSERT INTO interview_experience_sources
@@ -1718,6 +1889,7 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        ensure_active_application(&connection, application_id)?;
         connection
             .execute(
                 "INSERT INTO interview_experience_sources
@@ -1738,7 +1910,11 @@ impl Database {
         error_message: Option<&str>,
     ) -> Result<InterviewExperienceSource, String> {
         let questions_json = serde_json::to_string(questions).map_err(|error| error.to_string())?;
-        let status = if error_message.is_some() { "分析失败" } else { "已提取" };
+        let status = if error_message.is_some() {
+            "分析失败"
+        } else {
+            "已提取"
+        };
         let connection = self
             .connection
             .lock()
@@ -1765,7 +1941,10 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let changed = connection
-            .execute("DELETE FROM interview_experience_sources WHERE id = ?1", [id])
+            .execute(
+                "DELETE FROM interview_experience_sources WHERE id = ?1",
+                [id],
+            )
             .map_err(db_error)?;
         if changed == 0 {
             return Err("面经来源不存在".into());
@@ -2220,6 +2399,7 @@ impl Database {
         input: CreateEventInput,
     ) -> Result<ApplicationEvent, String> {
         let title = required(input.title, "事件标题")?;
+        let happened_at = clean_timestamp(input.happened_at, "发生时间")?;
         let event_id = Uuid::new_v4().to_string();
         let connection = self
             .connection
@@ -2228,7 +2408,7 @@ impl Database {
         connection.execute(
             "INSERT INTO application_events(id, application_id, event_type, title, content, source_type, happened_at)
              VALUES (?1, ?2, 'manual_note', ?3, ?4, 'manual', COALESCE(?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
-            params![event_id, application_id, title, clean(input.content), clean(input.happened_at)],
+            params![event_id, application_id, title, clean(input.content), happened_at],
         ).map_err(db_error)?;
         query_events(&connection, application_id)?
             .into_iter()
@@ -2268,15 +2448,18 @@ impl Database {
                 SELECT t.id, t.application_id, t.title, c.name AS company, p.title AS role, t.due_at, t.priority, t.status, t.application_stage, 0 AS bucket
                 FROM tasks t JOIN applications a ON a.id = t.application_id JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
                 WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL AND t.status IN ('todo', 'doing') AND t.due_at IS NOT NULL AND t.due_at < ?1
+                  AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%' AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
                 ORDER BY t.priority DESC, t.due_at LIMIT 6
              ), today AS (
                 SELECT t.id, t.application_id, t.title, c.name AS company, p.title AS role, t.due_at, t.priority, t.status, t.application_stage, 1 AS bucket
                 FROM tasks t JOIN applications a ON a.id = t.application_id JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
                 WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL AND t.status IN ('todo', 'doing') AND t.due_at >= ?1 AND t.due_at < ?2
+                  AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%' AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
              ), completed_today AS (
                 SELECT t.id, t.application_id, t.title, c.name AS company, p.title AS role, t.due_at, t.priority, t.status, t.application_stage, 2 AS bucket
                 FROM tasks t JOIN applications a ON a.id = t.application_id JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
                 WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL AND t.status = 'done' AND t.due_at IS NOT NULL AND t.completed_at >= ?1 AND t.completed_at < ?2
+                  AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%' AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
              )
              SELECT * FROM overdue UNION ALL SELECT * FROM today UNION ALL SELECT * FROM completed_today
              ORDER BY bucket, priority DESC, due_at",
@@ -2306,10 +2489,12 @@ impl Database {
             "SELECT 'task:' || t.id, a.id, t.title, c.name, p.title, t.due_at, 'task', COALESCE(t.application_stage, '')
              FROM tasks t JOIN applications a ON a.id = t.application_id JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
              WHERE t.deleted_at IS NULL AND a.deleted_at IS NULL AND a.archived_at IS NULL AND t.status NOT IN ('canceled') AND t.due_at >= ?1 AND t.due_at < ?2
+               AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%' AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
              UNION ALL
              SELECT 'next:' || a.id, a.id, COALESCE(a.next_action, '下一步行动'), c.name, p.title, a.next_action_due_at, 'next_action', a.current_stage
              FROM applications a JOIN positions p ON p.id = a.position_id JOIN companies c ON c.id = p.company_id
              WHERE a.deleted_at IS NULL AND a.archived_at IS NULL AND a.next_action_due_at >= ?1 AND a.next_action_due_at < ?2
+               AND a.current_stage NOT LIKE '%拒绝%' AND lower(a.current_stage) NOT LIKE '%offer%' AND a.current_stage NOT LIKE '%人才库%' AND a.current_stage NOT IN ('流程暂停','流程结束','主动放弃')
              UNION ALL
              SELECT 'milestone:' || e.id, a.id,
                     CASE WHEN e.event_type = 'application_created' THEN '新增投递'
@@ -2351,7 +2536,10 @@ impl Database {
     }
 
     pub fn get_analytics(&self) -> Result<AnalyticsData, String> {
-        let connection = self.connection.lock().map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let (total, this_month, previous_month, assessments, interviews, offers) = connection.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN date(COALESCE(applied_at,created_at),'localtime') >= date('now','localtime','start of month') THEN 1 ELSE 0 END),0),
@@ -2371,7 +2559,15 @@ impl Database {
 
         let periods = |sql: &str| -> Result<Vec<AnalyticsPeriod>, String> {
             let mut statement = connection.prepare(sql).map_err(db_error)?;
-            let rows = statement.query_map([], |row| Ok(AnalyticsPeriod { label: row.get(0)?, applications: row.get(1)?, interviews: row.get(2)? })).map_err(db_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(AnalyticsPeriod {
+                        label: row.get(0)?,
+                        applications: row.get(1)?,
+                        interviews: row.get(2)?,
+                    })
+                })
+                .map_err(db_error)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
         };
         let daily = periods(
@@ -2391,8 +2587,28 @@ impl Database {
         let mut direction_statement = connection.prepare(
             "SELECT COALESCE(NULLIF(TRIM(p.direction),''),p.title),COUNT(*) FROM applications a JOIN positions p ON p.id=a.position_id WHERE a.deleted_at IS NULL AND a.archived_at IS NULL GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 6"
         ).map_err(db_error)?;
-        let directions = direction_statement.query_map([], |row| Ok(AnalyticsDirection { name: row.get(0)?, count: row.get(1)? })).map_err(db_error)?.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
-        Ok(AnalyticsData { total, this_month, previous_month, assessments, interviews, offers, average_feedback_days, daily, weekly, directions })
+        let directions = direction_statement
+            .query_map([], |row| {
+                Ok(AnalyticsDirection {
+                    name: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(AnalyticsData {
+            total,
+            this_month,
+            previous_month,
+            assessments,
+            interviews,
+            offers,
+            average_feedback_days,
+            daily,
+            weekly,
+            directions,
+        })
     }
 
     fn get_application(&self, id: &str) -> Result<Option<ApplicationListItem>, String> {
@@ -2498,8 +2714,56 @@ fn required(value: String, field: &str) -> Result<String, String> {
     let value = value.trim().to_string();
     if value.is_empty() {
         Err(format!("{field}不能为空"))
+    } else if value.chars().count() > 500 {
+        Err(format!("{field}不能超过 500 字"))
     } else {
         Ok(value)
+    }
+}
+fn clean_date(value: Option<String>, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = clean(value) else {
+        return Ok(None);
+    };
+    if chrono::NaiveDate::parse_from_str(&value, "%Y-%m-%d").is_ok() {
+        return Ok(Some(value));
+    }
+    chrono::DateTime::parse_from_rfc3339(&value)
+        .map(|date| Some(date.date_naive().to_string()))
+        .map_err(|_| format!("{field}格式无效"))
+}
+fn clean_timestamp(value: Option<String>, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = clean(value) else {
+        return Ok(None);
+    };
+    let parsed =
+        chrono::DateTime::parse_from_rfc3339(&value).map_err(|_| format!("{field}格式无效"))?;
+    Ok(Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    ))
+}
+fn validate_task_times(due_at: Option<&str>, remind_at: Option<&str>) -> Result<(), String> {
+    match (due_at, remind_at) {
+        (None, Some(_)) => Err("设置提醒前必须先设置任务截止时间".into()),
+        (Some(due), Some(reminder)) if reminder > due => Err("任务提醒时间不能晚于截止时间".into()),
+        _ => Ok(()),
+    }
+}
+fn ensure_active_application(connection: &Connection, application_id: &str) -> Result<(), String> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM applications WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL
+               AND current_stage NOT LIKE '%拒绝%' AND lower(current_stage) NOT LIKE '%offer%'
+               AND current_stage NOT LIKE '%人才库%' AND current_stage NOT IN ('流程暂停','流程结束','主动放弃'))",
+            [application_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err("只能为使用中的投递执行此操作".into())
     }
 }
 
@@ -2552,6 +2816,41 @@ fn json_error(error: serde_json::Error) -> String {
     format!("设置数据格式错误: {error}")
 }
 
+fn remove_database_files(path: &Path) {
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", path.to_string_lossy())),
+        PathBuf::from(format!("{}-shm", path.to_string_lossy())),
+    ] {
+        if candidate.exists() {
+            let _ = fs::remove_file(candidate);
+        }
+    }
+}
+
+fn validate_database_file(path: &Path) -> Result<(), String> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| format!("无法打开数据库备份: {error}"))?;
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(db_error)?;
+    if integrity != "ok" {
+        return Err(format!("备份完整性检查失败: {integrity}"));
+    }
+    let compatible: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')
+                 AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='applications')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !compatible {
+        return Err("所选文件不是有效的“投了吗”数据库备份".into());
+    }
+    Ok(())
+}
+
 fn is_allowed_provider_url(value: &str) -> bool {
     let Ok(parsed) = url::Url::parse(value) else {
         return false;
@@ -2564,6 +2863,51 @@ fn is_allowed_provider_url(value: &str) -> bool {
         "http" => matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "::1")),
         _ => false,
     }
+}
+fn clean_external_url(value: Option<String>, field: &str) -> Result<Option<String>, String> {
+    let Some(value) = clean(value) else {
+        return Ok(None);
+    };
+    if value.chars().count() > 2048 {
+        return Err(format!("{field}不能超过 2048 个字符"));
+    }
+    let parsed = url::Url::parse(&value).map_err(|_| format!("{field}不是有效网址"))?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(format!("{field}必须是 HTTP 或 HTTPS 网址"));
+    }
+    Ok(Some(parsed.to_string()))
+}
+fn valid_network_host(host: &str) -> bool {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+fn is_local_network_host(host: &str) -> bool {
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
 }
 fn priority_label(priority: i64) -> &'static str {
     match priority {
@@ -2579,20 +2923,33 @@ fn stage_tone(stage: &str) -> &'static str {
         "teal"
     } else if stage.contains("面") || stage.contains("HR") {
         "purple"
-    } else if stage.contains("测评") || stage.contains("笔试") {
-        "orange"
-    } else if stage.contains("沟通") || stage.contains("谈薪") {
+    } else if stage.contains("测评")
+        || stage.contains("笔试")
+        || stage.contains("沟通")
+        || stage.contains("谈薪")
+    {
         "orange"
     } else if stage.contains("复盘") {
         "purple"
-    } else if stage.contains("等待") || stage.contains("人才库") || stage.contains("暂停") || stage.contains("结束") {
+    } else if stage.contains("等待")
+        || stage.contains("人才库")
+        || stage.contains("暂停")
+        || stage.contains("结束")
+        || stage.contains("放弃")
+    {
         "gray"
     } else {
         "blue"
     }
 }
 fn stage_progress(stage: &str) -> i64 {
-    if stage.contains("拒绝") || stage.to_lowercase().contains("offer") || stage.contains("人才库") || stage.contains("暂停") || stage.contains("结束") {
+    if stage.contains("拒绝")
+        || stage.to_lowercase().contains("offer")
+        || stage.contains("人才库")
+        || stage.contains("暂停")
+        || stage.contains("结束")
+        || stage.contains("放弃")
+    {
         5
     } else if stage.contains("等待") {
         4
@@ -2616,6 +2973,57 @@ fn schedule_tone(value: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_location_persistence_keeps_the_original_database_active() {
+        let root = std::env::temp_dir().join(format!("applied-yet-relocate-{}", Uuid::new_v4()));
+        let original = root.join("original").join("applied-yet.sqlite3");
+        let target_dir = root.join("target");
+        let target = target_dir.join("applied-yet.sqlite3");
+        let db = Database::open(&original).unwrap();
+        let application = db.create_application(input()).unwrap();
+
+        let result = db.relocate(&target_dir, |_| Err("pointer write failed".into()));
+
+        assert!(result.is_err());
+        assert_eq!(db.storage_path().unwrap(), original.to_string_lossy());
+        assert!(!target.exists());
+        assert_eq!(
+            db.get_application_detail(&application.id).unwrap().id,
+            application.id
+        );
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_and_restore_preserve_the_previous_database() {
+        let root = std::env::temp_dir().join(format!("applied-yet-backup-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("source.sqlite3");
+        let source = Database::open(&source_path).unwrap();
+        let source_application = source.create_application(input()).unwrap();
+        let backup_path = root.join("backup.sqlite3");
+        source.backup_to(&backup_path).unwrap();
+
+        let active_path = root.join("active.sqlite3");
+        let active = Database::open(&active_path).unwrap();
+        active.create_application(input()).unwrap();
+        let restored_path = active.restore_from(&backup_path, |_| Ok(())).unwrap();
+        assert_ne!(restored_path, active_path.to_string_lossy());
+        assert!(active_path.exists());
+        assert_eq!(
+            active
+                .get_application_detail(&source_application.id)
+                .unwrap()
+                .id,
+            source_application.id
+        );
+
+        drop(active);
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn legacy_version_8_database_is_upgraded_with_recorded_at() {
@@ -2675,7 +3083,12 @@ mod tests {
         Database::configure(&connection).unwrap();
         connection.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));").unwrap();
         for version in 1..=11 {
-            connection.execute("INSERT INTO schema_migrations(version,name) VALUES (?1,?2)", params![version, format!("legacy_{version}")]).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations(version,name) VALUES (?1,?2)",
+                    params![version, format!("legacy_{version}")],
+                )
+                .unwrap();
         }
         connection.execute_batch(
             "CREATE TABLE email_messages(id TEXT PRIMARY KEY);
@@ -2693,8 +3106,17 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let created = db.create_application(input()).unwrap();
         let connection = db.connection.lock().unwrap();
-        connection.execute("UPDATE applications SET current_stage='流程暂停' WHERE id=?1", [&created.id]).unwrap();
-        let migration = MIGRATIONS.iter().find(|(version, _, _)| *version == 14).unwrap().2;
+        connection
+            .execute(
+                "UPDATE applications SET current_stage='流程暂停' WHERE id=?1",
+                [&created.id],
+            )
+            .unwrap();
+        let migration = MIGRATIONS
+            .iter()
+            .find(|(version, _, _)| *version == 14)
+            .unwrap()
+            .2;
         connection.execute_batch(migration).unwrap();
         drop(connection);
         let item = db.list_applications().unwrap().remove(0);
@@ -2809,7 +3231,8 @@ mod tests {
             "使用业务唯一键和数据库唯一约束。",
         )
         .unwrap();
-        db.update_interview_session_progress(&session.id, 1).unwrap();
+        db.update_interview_session_progress(&session.id, 1)
+            .unwrap();
         let resumed = db.get_interview_session(&session.id).unwrap();
         assert_eq!(resumed.current_question_index, 1);
         assert!(resumed.questions[0].answer.contains("唯一键"));
@@ -2949,7 +3372,9 @@ mod tests {
                 params![backfilled_id, created.id],
             ).unwrap();
         }
-        assert!(db.update_application_event_time(&later_id, "2026-07-18T00:00:00.000Z").is_ok());
+        assert!(db
+            .update_application_event_time(&later_id, "2026-07-18T00:00:00.000Z")
+            .is_ok());
     }
 
     #[test]
@@ -3183,6 +3608,44 @@ mod tests {
     }
 
     #[test]
+    fn terminal_stages_suppress_actions_tasks_and_reminders() {
+        let db = Database::in_memory().unwrap();
+        let created = db.create_application(input()).unwrap();
+        db.create_task(
+            &created.id,
+            CreateTaskInput {
+                title: "不应继续提醒".into(),
+                description: None,
+                priority: 2,
+                due_at: Some("2026-07-20T02:00:00.000Z".into()),
+                remind_at: Some("2026-07-20T01:00:00.000Z".into()),
+                application_stage: Some("HR面试".into()),
+            },
+        )
+        .unwrap();
+        db.update_application_stage(&created.id, "主动放弃")
+            .unwrap();
+
+        assert!(db
+            .list_due_task_reminders("2026-07-20T01:01:00.000Z")
+            .unwrap()
+            .is_empty());
+        let dashboard = db
+            .get_dashboard(
+                "2026-07-01T00:00:00.000Z",
+                "2026-08-01T00:00:00.000Z",
+                "2026-07-20T00:00:00.000Z",
+                "2026-07-21T00:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(dashboard.summary.active, 0);
+        assert!(dashboard.tasks.is_empty());
+        assert!(db.get_ai_application_context(&created.id).is_err());
+        assert_eq!(stage_tone("主动放弃"), "gray");
+        assert_eq!(stage_progress("主动放弃"), 5);
+    }
+
+    #[test]
     fn task_management_archiving_event_revert_and_reminder_dedup_work() {
         let db = Database::in_memory().unwrap();
         let created = db.create_application(input()).unwrap();
@@ -3283,11 +3746,11 @@ mod tests {
             .unwrap();
         assert_eq!(dashboard.summary.total, 0);
         db.set_application_archived(&created.id, false).unwrap();
-        assert!(!db
+        assert!(db
             .get_application_detail(&created.id)
             .unwrap()
             .archived_at
-            .is_some());
+            .is_none());
     }
 
     #[test]
@@ -3427,7 +3890,6 @@ mod tests {
             max_output_tokens: 2048,
             timeout_seconds: 45,
             allow_resume: true,
-            allow_email: false,
             allow_transcript: true,
             prompt_before_send: true,
         };
@@ -3449,7 +3911,7 @@ mod tests {
         let saved = db.get_provider_settings().unwrap();
         assert_eq!(saved.ai.model, ai.model);
         assert_eq!(saved.ai.base_url, ai.base_url);
-        assert!(!saved.ai.allow_email);
+        assert!(saved.ai.allow_resume);
         assert!(saved.ai.prompt_before_send);
         assert_eq!(saved.asr.provider, asr.provider);
         assert_eq!(saved.asr.segment_seconds, 600);
@@ -3457,11 +3919,32 @@ mod tests {
         let mut invalid = ai;
         invalid.base_url = "http://remote.example.com/v1".into();
         assert!(db.save_ai_settings(invalid).is_err());
+        let invalid_protocol = AiProviderSettings {
+            protocol: "unsupported".into(),
+            ..AiProviderSettings::default()
+        };
+        assert!(db.save_ai_settings(invalid_protocol).is_err());
         assert!(!is_allowed_provider_url("http://localhost.evil.example/v1"));
         assert!(!is_allowed_provider_url(
             "http://localhost:11434@evil.com/v1"
         ));
         assert!(is_allowed_provider_url("http://localhost:11434/v1"));
+        assert!(clean_external_url(Some("javascript:alert(1)".into()), "链接").is_err());
+        assert_eq!(
+            clean_external_url(Some("https://example.com/jobs".into()), "链接").unwrap(),
+            Some("https://example.com/jobs".into())
+        );
+        assert!(valid_network_host("imap.example.com"));
+        assert!(valid_network_host("::1"));
+        assert!(!valid_network_host("https://imap.example.com"));
+        assert!(!valid_network_host("bad host"));
+        assert!(db
+            .save_email_settings(EmailSettings {
+                imap_host: "imap.example.com".into(),
+                use_tls: false,
+                ..EmailSettings::default()
+            })
+            .is_err());
     }
 
     #[test]
@@ -3569,7 +4052,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edited.name, "产品简历（更新）");
-        assert!(db.get_resume_profile(&first.id).unwrap().is_primary == false);
+        assert!(!db.get_resume_profile(&first.id).unwrap().is_primary);
         assert!(db.get_resume_profile(&second.id).unwrap().is_primary);
         db.delete_resume_profile(&first.id).unwrap();
         assert_eq!(db.list_resume_profiles().unwrap().len(), 1);
@@ -3578,19 +4061,36 @@ mod tests {
     #[test]
     fn resume_stage_counts_include_historical_reach() {
         let db = Database::in_memory().unwrap();
-        let resume = db.create_resume_profile(CreateResumeProfileInput {
-            name: "历史阶段简历".into(), file_path: None, file_format: None, parsed_text: None,
-            personal_info: None, education_background: None, internship_experience: None,
-            project_experience: None, professional_skills: None, academic_achievements: None,
-            skill_certificates: None, target_direction: None, notes: None, parent_profile_id: None,
-            is_primary: true,
-        }).unwrap();
+        let resume = db
+            .create_resume_profile(CreateResumeProfileInput {
+                name: "历史阶段简历".into(),
+                file_path: None,
+                file_format: None,
+                parsed_text: None,
+                personal_info: None,
+                education_background: None,
+                internship_experience: None,
+                project_experience: None,
+                professional_skills: None,
+                academic_achievements: None,
+                skill_certificates: None,
+                target_direction: None,
+                notes: None,
+                parent_profile_id: None,
+                is_primary: true,
+            })
+            .unwrap();
         let mut application_input = input();
         application_input.resume_profile_id = Some(resume.id.clone());
         let application = db.create_application(application_input).unwrap();
         {
             let connection = db.connection.lock().unwrap();
-            connection.execute("UPDATE applications SET current_stage='已获Offer' WHERE id=?1", [&application.id]).unwrap();
+            connection
+                .execute(
+                    "UPDATE applications SET current_stage='已获Offer' WHERE id=?1",
+                    [&application.id],
+                )
+                .unwrap();
             connection.execute(
                 "INSERT INTO application_events(id,application_id,event_type,title,source_type,stage_before,stage_after,happened_at) VALUES (?1,?2,'stage_changed','进入测评','manual','已投递','在线测评','2026-07-15T00:00:00Z')",
                 params![Uuid::new_v4().to_string(), application.id],

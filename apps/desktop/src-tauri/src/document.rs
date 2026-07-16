@@ -3,6 +3,10 @@ use quick_xml::{events::Event, Reader};
 use serde::Serialize;
 use std::{fs, io::Read, path::Path, time::Instant};
 
+const MAX_DOCUMENT_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_DOCX_XML_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_EXTRACTED_CHARACTERS: usize = 2_000_000;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ParsedDocument {
@@ -52,6 +56,12 @@ pub fn extract_document(path: &Path) -> Result<(String, String), String> {
     if !path.is_file() {
         return Err("文档不存在或不是文件".to_string());
     }
+    let length = fs::metadata(path)
+        .map_err(|error| format!("无法读取文档信息: {error}"))?
+        .len();
+    if length > MAX_DOCUMENT_BYTES {
+        return Err("文档超过 50 MB 限制".to_string());
+    }
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -67,17 +77,25 @@ pub fn extract_document(path: &Path) -> Result<(String, String), String> {
         "docx" => extract_docx(path)?,
         _ => return Err("暂不支持该文档格式；请选择 PDF、DOCX、TXT 或 Markdown".to_string()),
     };
-    Ok((extension, normalize_extracted_text(&text)))
+    let text = normalize_extracted_text(&text);
+    if text.chars().count() > MAX_EXTRACTED_CHARACTERS {
+        return Err("文档提取文本超过 200 万字限制".to_string());
+    }
+    Ok((extension, text))
 }
 
 fn extract_docx(path: &Path) -> Result<String, String> {
     let file = fs::File::open(path).map_err(|error| format!("读取 DOCX 失败: {error}"))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|error| format!("DOCX 文件结构无效: {error}"))?;
-    let mut xml = String::new();
-    archive
+    let mut document = archive
         .by_name("word/document.xml")
-        .map_err(|_| "DOCX 缺少正文内容".to_string())?
+        .map_err(|_| "DOCX 缺少正文内容".to_string())?;
+    if document.size() > MAX_DOCX_XML_BYTES {
+        return Err("DOCX 解压后的正文超过 20 MB 限制".to_string());
+    }
+    let mut xml = String::new();
+    document
         .read_to_string(&mut xml)
         .map_err(|error| format!("读取 DOCX 正文失败: {error}"))?;
     let mut reader = Reader::from_str(&xml);

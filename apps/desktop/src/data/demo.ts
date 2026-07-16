@@ -2,6 +2,7 @@ import type { StoredInterviewPreparation, AiCallSummary, PredictedQuestion } fro
 import type { ActivitySummary, AnalyticsData, DashboardData } from "../services/dashboard";
 import type { EmailStats, RecruitmentEmail } from "../services/emails";
 import type { ResumeProfile } from "../services/resumes";
+import type { QuestionBankItem } from "../services/interviews";
 
 const iso = (dayOffset: number, hour = 9, minute = 0) => {
   const value = new Date();
@@ -17,12 +18,14 @@ const monthLabel = (offset: number) => {
 };
 
 export const demoDashboard = (): DashboardData => ({
-  summary: { total: 24, active: 12, assessments: 4, interviews: 6, waiting: 2, offers: 3, rejected: 9 },
+  summary: { total: 26, active: 14, assessments: 4, interviews: 6, waiting: 2, offers: 5, rejected: 9 },
   tasks: [
     { id: "demo-task-1", applicationId: "ant", title: "整理支付链路项目数据", company: "蚂蚁集团", role: "后端开发工程师", dueAt: iso(0, 10, 30), priority: 3, status: "todo", overdue: false, tone: "red" },
     { id: "demo-task-2", applicationId: "meituan", title: "准备 HR 薪资沟通", company: "美团", role: "Java 开发工程师", dueAt: iso(0, 15, 30), priority: 2, status: "doing", overdue: false, tone: "orange" },
     { id: "demo-task-3", applicationId: "shopee", title: "完成在线测评", company: "Shopee", role: "平台开发工程师", dueAt: iso(0, 23, 59), priority: 3, status: "todo", overdue: false, tone: "green" },
     { id: "demo-task-4", applicationId: "tencent", title: "复盘缓存一致性方案", company: "腾讯科技", role: "后台开发工程师", dueAt: iso(0, 9, 0), priority: 1, status: "done", overdue: false, tone: "purple" },
+    { id: "demo-task-5", applicationId: "ali", title: "确认薪资方案与入职时间", company: "阿里巴巴", role: "后端开发工程师", dueAt: iso(1, 12, 0), priority: 3, status: "todo", overdue: false, tone: "orange" },
+    { id: "demo-task-6", applicationId: "huawei", title: "回复 Offer 意向确认邮件", company: "华为", role: "分布式存储工程师", dueAt: iso(3, 17, 0), priority: 2, status: "todo", overdue: false, tone: "teal" },
   ],
   events: [
     { id: "demo-event-1", applicationId: "ant", title: "技术一面", company: "蚂蚁集团", role: "后端开发工程师", scheduledAt: iso(0, 14, 0), kind: "milestone", tone: "purple" },
@@ -33,6 +36,8 @@ export const demoDashboard = (): DashboardData => ({
     { id: "demo-event-6", applicationId: "jd", title: "跟进面试结果", company: "京东", role: "数据开发工程师", scheduledAt: iso(-1, 17, 0), kind: "task", tone: "red" },
     { id: "demo-event-7", applicationId: "ant", title: "新增投递", company: "蚂蚁集团", role: "后端开发工程师", scheduledAt: iso(-5, 11, 20), kind: "milestone", tone: "blue" },
     { id: "demo-event-8", applicationId: "meituan", title: "薪资方案确认", company: "美团", role: "Java 开发工程师", scheduledAt: iso(5, 16, 0), kind: "next_action", tone: "teal" },
+    { id: "demo-event-9", applicationId: "ali", title: "谈薪中", company: "阿里巴巴", role: "后端开发工程师", scheduledAt: iso(0, 18, 0), kind: "milestone", tone: "orange" },
+    { id: "demo-event-10", applicationId: "huawei", title: "Offer 截止", company: "华为", role: "分布式存储工程师", scheduledAt: iso(3, 23, 59), kind: "task", tone: "teal" },
   ],
 });
 
@@ -42,9 +47,9 @@ export const demoActivity = (): ActivitySummary => ({
 });
 
 export const demoAnalytics = (): AnalyticsData => ({
-  total: 24, thisMonth: 9, previousMonth: 7, assessments: 13, interviews: 9, offers: 3, averageFeedbackDays: 2.6,
-  daily: ["一", "二", "三", "四", "五", "六", "日"].map((label, index) => ({ label: `周${label}`, applications: [1, 3, 2, 4, 2, 1, 3][index], interviews: [0, 1, 1, 2, 1, 0, 2][index] })),
-  weekly: Array.from({ length: 8 }, (_, index) => ({ label: `${index + 1}周前`, applications: [3, 5, 4, 7, 6, 4, 8, 6][index], interviews: [1, 2, 1, 3, 2, 2, 4, 3][index] })),
+  total: 26, thisMonth: 10, previousMonth: 7, assessments: 13, interviews: 9, offers: 5, averageFeedbackDays: 2.6,
+  daily: ["一", "二", "三", "四", "五", "六", "日"].map((label, index) => ({ label: `周${label}`, applications: [1, 3, 2, 4, 2, 1, 3][index] ?? 0, interviews: [0, 1, 1, 2, 1, 0, 2][index] ?? 0 })),
+  weekly: Array.from({ length: 8 }, (_, index) => ({ label: `${index + 1}周前`, applications: [3, 5, 4, 7, 6, 4, 8, 6][index] ?? 0, interviews: [1, 2, 1, 3, 2, 2, 4, 3][index] ?? 0 })),
   directions: [{ name: "Java / 后端开发", count: 11 }, { name: "平台研发", count: 6 }, { name: "数据开发", count: 4 }, { name: "前端开发", count: 3 }],
 });
 
@@ -68,11 +73,42 @@ const initialResumes: ResumeProfile[] = [
 ];
 
 let demoResumes = initialResumes.map((item) => ({ ...item }));
+const normalizeDemoResumePrimary = () => {
+  const primaryId = demoResumes.find((item) => item.isPrimary && !item.archivedAt)?.id
+    ?? demoResumes.find((item) => !item.archivedAt)?.id;
+  demoResumes = demoResumes.map((item) => ({ ...item, isPrimary: item.id === primaryId }));
+};
 export const listDemoResumes = async () => demoResumes.map((item) => ({ ...item }));
-export const replaceDemoResume = async (id: string, value: Partial<ResumeProfile>) => { const now = new Date().toISOString(); demoResumes = demoResumes.map((item) => item.id === id ? { ...item, ...value, updatedAt: now } : item); return { ...demoResumes.find((item) => item.id === id)! }; };
-export const createDemoResume = async (name: string, source?: ResumeProfile) => { const now = new Date().toISOString(); const created: ResumeProfile = source ? { ...source, id: `resume-${Date.now()}`, name, isPrimary: false, archivedAt: undefined, linkedApplicationCount: 0, assessmentCount: 0, interviewCount: 0, offerCount: 0, createdAt: now, updatedAt: now } : { id: `resume-${Date.now()}`, name, parsedText: "", personalInfo: "{}", educationBackground: "[]", internshipExperience: "[]", projectExperience: "[]", professionalSkills: "", academicAchievements: "[]", skillCertificates: "[]", targetDirection: "", notes: "", linkedApplicationCount: 0, assessmentCount: 0, interviewCount: 0, offerCount: 0, isPrimary: false, createdAt: now, updatedAt: now }; demoResumes = [created, ...demoResumes]; return { ...created }; };
-export const deleteDemoResume = async (id: string) => { demoResumes = demoResumes.filter((item) => item.id !== id); };
-export const primaryDemoResume = async (id: string) => { demoResumes = demoResumes.map((item) => ({ ...item, isPrimary: item.id === id })); };
+export const replaceDemoResume = async (id: string, value: Partial<ResumeProfile>) => {
+  if (!demoResumes.some((item) => item.id === id)) throw new Error("简历不存在");
+  const now = new Date().toISOString();
+  demoResumes = demoResumes.map((item) => item.id === id ? { ...item, ...value, updatedAt: now } : item);
+  normalizeDemoResumePrimary();
+  const updated = demoResumes.find((item) => item.id === id);
+  if (!updated) throw new Error("简历不存在");
+  return { ...updated };
+};
+export const createDemoResume = async (name: string, source?: ResumeProfile) => {
+  const now = new Date().toISOString();
+  const isPrimary = !demoResumes.some((item) => !item.archivedAt);
+  const created: ResumeProfile = source
+    ? { ...source, id: `resume-${Date.now()}`, name, isPrimary, archivedAt: undefined, linkedApplicationCount: 0, assessmentCount: 0, interviewCount: 0, offerCount: 0, createdAt: now, updatedAt: now }
+    : { id: `resume-${Date.now()}`, name, parsedText: "", personalInfo: "{}", educationBackground: "[]", internshipExperience: "[]", projectExperience: "[]", professionalSkills: "", academicAchievements: "[]", skillCertificates: "[]", targetDirection: "", notes: "", linkedApplicationCount: 0, assessmentCount: 0, interviewCount: 0, offerCount: 0, isPrimary, createdAt: now, updatedAt: now };
+  demoResumes = [created, ...demoResumes];
+  normalizeDemoResumePrimary();
+  return { ...created, isPrimary };
+};
+export const deleteDemoResume = async (id: string) => {
+  if (!demoResumes.some((item) => item.id === id)) throw new Error("简历不存在");
+  demoResumes = demoResumes.filter((item) => item.id !== id);
+  normalizeDemoResumePrimary();
+};
+export const primaryDemoResume = async (id: string) => {
+  const target = demoResumes.find((item) => item.id === id);
+  if (!target) throw new Error("简历不存在");
+  if (target.archivedAt) throw new Error("归档简历不能设为默认简历");
+  demoResumes = demoResumes.map((item) => ({ ...item, isPrimary: item.id === id }));
+};
 
 export const demoPreparation = (applicationId: string): StoredInterviewPreparation => ({
   id: `demo-prep-${applicationId}`, applicationId, aiCallId: `demo-call-${applicationId}`, model: "演示模型 · 求职教练", createdAt: iso(-1, 20, 18), sources: [{ type: "job_description" }, { type: "resume_profile" }, { type: "interview_experience" }],
@@ -80,6 +116,22 @@ export const demoPreparation = (applicationId: string): StoredInterviewPreparati
 });
 
 export const demoAiCalls = (applicationId: string): AiCallSummary[] => [{ id: `demo-call-${applicationId}`, feature: "interview_preparation", model: "演示模型 · 求职教练", status: "succeeded", attempts: 1, durationMs: 1380, inputSources: [{ type: "job_description" }, { type: "resume_profile" }], createdAt: iso(-1, 20, 18) }];
-export const demoResumeQuestions = (count: number): PredictedQuestion[] => Array.from({ length: count }, (_, index) => ({ question: ["请介绍订单系统重构中你个人负责的部分。", "为什么选择 Kafka 异步化，如何处理失败？", "你如何证明 P99 延迟降低 38% 来自这次优化？", "高峰流量下如何保护数据库？", "说一次你推动跨团队方案落地的经历。"][index % 5], rationale: "根据关联简历与岗位职责生成", sourceBasis: ["关联简历", "岗位 JD"] }));
+export const demoResumeQuestions = (count: number): PredictedQuestion[] => {
+  const questions = ["请介绍订单系统重构中你个人负责的部分。", "为什么选择 Kafka 异步化，如何处理失败？", "你如何证明 P99 延迟降低 38% 来自这次优化？", "高峰流量下如何保护数据库？", "说一次你推动跨团队方案落地的经历。"];
+  return Array.from({ length: count }, (_, index) => ({ question: questions[index % questions.length] ?? "请介绍一个最有代表性的项目。", rationale: "根据关联简历与岗位职责生成", sourceBasis: ["关联简历", "岗位 JD"] }));
+};
 
 export const demoMonthLabels = [monthLabel(-2), monthLabel(-1), monthLabel(0)];
+
+const demoBankItems: QuestionBankItem[] = [
+  { id: "bank-1", prompt: "介绍一下订单系统重构项目及你个人负责的部分。", category: "项目深挖", bestAnswer: "从原系统耦合问题出发，说明拆分思路、异步化方案以及个人在架构设计与压测中的具体工作。", mastery: "熟悉", source: "AI 简历题", occurrenceCount: 3, lastSeenAt: iso(-1) },
+  { id: "bank-2", prompt: "如何处理消息重复消费与最终一致性？", category: "专业知识", bestAnswer: "通过业务唯一键和状态机实现幂等，辅以消费日志和定时对账兜底。", mastery: "掌握", source: "真实面试", occurrenceCount: 5, lastSeenAt: iso(0) },
+  { id: "bank-3", prompt: "线上服务延迟突然升高，你会按什么顺序排查？", category: "专业知识", bestAnswer: "先确认变更与发布，再查监控定位资源瓶颈（CPU/内存/IO/网络），然后分析慢查询与 GC 日志。", mastery: "练习中", source: "面经", occurrenceCount: 2, lastSeenAt: iso(-3) },
+  { id: "bank-4", prompt: "讲一次你与团队意见不一致的经历。", category: "行为面试", bestAnswer: "使用 STAR 结构，说明分歧双方的诉求、你用数据推动决策的过程以及最终的量化成果。", mastery: "待加强", source: "AI 简历题", occurrenceCount: 1, lastSeenAt: iso(-5) },
+  { id: "bank-5", prompt: "如何证明 P99 延迟降低 38% 来自你的优化？", category: "项目深挖", bestAnswer: "明确基线测量口径，用 A/B 对比控制变量，展示优化前后的火焰图或耗时分布。", mastery: "熟悉", source: "AI 简历题", occurrenceCount: 2, lastSeenAt: iso(-2) },
+  { id: "bank-6", prompt: "对 JVM 内存模型和常见 GC 问题的理解。", category: "专业知识", bestAnswer: "解释堆分区、GC 算法选择依据，结合一次实际 GC 调优案例说明停顿分析与参数调整。", mastery: "练习中", source: "面经", occurrenceCount: 2, lastSeenAt: iso(-4) },
+  { id: "bank-7", prompt: "为什么选择这个岗位和公司？", category: "岗位动机", bestAnswer: "从技术方向、业务前景和个人成长三个角度组织，体现对公司和团队的真实了解。", mastery: "掌握", source: "真实面试", occurrenceCount: 4, lastSeenAt: iso(-1) },
+];
+
+export const listDemoQuestionBankItems = async (): Promise<QuestionBankItem[]> => demoBankItems.map((item) => ({ ...item }));
+

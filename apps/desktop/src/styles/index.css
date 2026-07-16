@@ -948,6 +948,20 @@ textarea { resize: vertical; }
 
 .toast--success { background: #123b2b; border-color: #1d7a55; }
 .toast--error { background: #4a1d24; border-color: #a83b4a; }
+
+.fatal-error {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  color: var(--text);
+  background: var(--bg);
+}
+.fatal-error > div { width: min(560px, 100%); padding: 32px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+.fatal-error span { color: var(--red); font-weight: 700; }
+.fatal-error h1 { margin: 8px 0 12px; font-size: 26px; }
+.fatal-error p { color: var(--text-secondary); line-height: 1.7; }
+.fatal-error pre { max-height: 160px; margin: 18px 0; padding: 12px; overflow: auto; white-space: pre-wrap; border-radius: 8px; background: var(--soft); color: var(--text-secondary); }
 .toast--info { background: #1d315b; border-color: #416bc0; }
 
 .resume-ai-hint { margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; color: var(--muted); background: var(--soft); font-size: 12px; }
@@ -2190,7 +2204,6 @@ textarea { resize: vertical; }
 .table-card .company-logo {
   align-self: center;
   box-sizing: border-box;
-  padding-top: 1px;
   line-height: 1
 }
 
@@ -2199,7 +2212,7 @@ textarea { resize: vertical; }
   text-align: center
 }
 
-.table-card td>span:not(.badge) {
+.table-card td>span:not(.badge):not(.company-logo) {
   display: flex;
   flex-direction: column
 }
@@ -3852,12 +3865,6 @@ textarea { resize: vertical; }
   font-size: 12px
 }
 
-.data-disclaimer {
-  text-align: right;
-  font-size: 9px;
-  color: var(--text-placeholder);
-  padding: 0 15px
-}
 
 .analytics-kpis {
   display: grid;
@@ -5931,6 +5938,21 @@ textarea { resize: vertical; }
 .detail-title-line h1 {
   margin: 0;
   font-size: 22px;
+}
+
+.detail-stage-select {
+  min-height: 30px;
+  max-width: 150px;
+  border: 1px solid var(--border-input);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 0 28px 0 9px;
+  font-size: 10px;
+}
+
+.detail-stage-select:disabled {
+  opacity: .55;
 }
 
 .detail-header-actions {

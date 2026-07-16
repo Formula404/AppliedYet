@@ -1,4 +1,5 @@
 use tauri::Manager;
+use tauri_plugin_opener::OpenerExt;
 
 mod ai;
 mod asr;
@@ -8,6 +9,7 @@ mod database;
 use database as db;
 mod document;
 mod experience;
+mod http;
 mod resume;
 mod resume_ai;
 
@@ -18,6 +20,30 @@ fn app_info() -> serde_json::Value {
     serde_json::json!({ "name": "投了吗", "version": env!("CARGO_PKG_VERSION"), "storage": "local-first" })
 }
 
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    let parsed = validate_external_url(&url)?;
+    app.opener()
+        .open_url(parsed.as_str(), None::<&str>)
+        .map_err(|error| format!("无法打开系统浏览器: {error}"))
+}
+
+fn validate_external_url(url: &str) -> Result<url::Url, String> {
+    if url.chars().count() > 2048 || url.chars().any(char::is_control) {
+        return Err("外部链接无效或过长".into());
+    }
+    let parsed = url::Url::parse(url).map_err(|_| "外部链接格式无效".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto")
+        || (matches!(parsed.scheme(), "http" | "https")
+            && (parsed.host_str().is_none()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()))
+    {
+        return Err("只允许打开 HTTP、HTTPS 或邮件链接".into());
+    }
+    Ok(parsed)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +52,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             app_info,
+            open_external_url,
             commands::applications::list_applications,
             commands::applications::get_activity_summary,
             commands::applications::get_analytics,
@@ -53,6 +80,8 @@ pub fn run() {
             commands::settings::save_email_settings,
             commands::settings::get_data_location,
             commands::settings::set_data_location,
+            commands::settings::backup_database,
+            commands::settings::restore_database,
             commands::settings::credential_status,
             commands::settings::set_credential,
             commands::settings::delete_credential,
@@ -114,4 +143,17 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动投了吗失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn external_url_allowlist_rejects_unsafe_schemes_and_credentials() {
+        assert!(validate_external_url("https://example.com/jobs").is_ok());
+        assert!(validate_external_url("mailto:jobs@example.com").is_ok());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("https://user:secret@example.com").is_err());
+    }
 }

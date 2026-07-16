@@ -66,8 +66,9 @@ pub(crate) fn complete_interview_session(
 pub(crate) async fn generate_interview_review(
     db: tauri::State<'_, Database>,
     id: String,
+    confirm_ai_send: bool,
 ) -> Result<InterviewSessionRecord, String> {
-    ai::generate_interview_review(&db, &id).await
+    ai::generate_interview_review(&db, &id, confirm_ai_send).await
 }
 
 #[tauri::command]
@@ -75,8 +76,9 @@ pub(crate) async fn import_interview_transcript(
     db: tauri::State<'_, Database>,
     application_id: String,
     transcript: String,
+    confirm_ai_send: bool,
 ) -> Result<InterviewSessionRecord, String> {
-    ai::import_interview_transcript(&db, &application_id, &transcript).await
+    ai::import_interview_transcript(&db, &application_id, &transcript, confirm_ai_send).await
 }
 
 #[tauri::command]

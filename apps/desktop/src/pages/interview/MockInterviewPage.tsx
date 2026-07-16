@@ -6,6 +6,7 @@ import { useInterviewFlow } from "../../hooks/useInterviewFlow";
 import { generateResumeQuestions } from "../../services/ai";
 import { hasLocalDatabase } from "../../services/applications";
 import { listQuestionBankItems, type QuestionBankItem } from "../../services/interviews";
+import { requestAiSendConfirmation } from "../../services/settings";
 
 const sessionTime = (value: string) => {
   const date = new Date(value);
@@ -48,8 +49,9 @@ export default function MockInterviewPage() {
     try {
       let generated: string[] | undefined;
       if (useAi && resumeReady) {
-        if (hasLocalDatabase && !window.confirm(`将把“${selected.resumeName || "关联简历"}”和岗位信息发送给 AI，生成本场简历深挖题。是否继续？`)) return;
-        generated = (await generateResumeQuestions(selected.id, count)).map((item) => item.question);
+        const confirmed = await requestAiSendConfirmation(`将把“${selected.resumeName || "关联简历"}”和岗位信息发送给 AI，生成本场简历深挖题。是否继续？`);
+        if (!confirmed) return;
+        generated = (await generateResumeQuestions(selected.id, count, confirmed)).map((item) => item.question);
       }
       const created = await createMockSession({ applicationId: selected.id, questionCount: count, useExperience: experienceSelected, useAi: useAi && resumeReady, useBank, bankQuestions: bankItems.map((item) => item.prompt), resumeQuestions: generated });
       setSessionId(created.id);
@@ -65,6 +67,6 @@ export default function MockInterviewPage() {
       <div className="question-count"><label><span>问题数量</span><input type="number" min="1" max="30" value={count} onChange={(event) => setCount(Math.max(1, Math.min(30, Number(event.target.value) || 1)))}/><small>题</small></label><div>{[5, 8, 12, 15].map((value) => <button key={value} className={count === value ? "active" : ""} onClick={() => setCount(value)}>{value} 题</button>)}</div></div>
       <button className="button button--primary large" disabled={generating || (!experienceSelected && !(useAi && resumeReady) && !(useBank && bankItems.length))} onClick={start}><Play size={17}/>{generating ? "正在生成简历问题…" : `生成并开始 ${count} 题模拟`}</button>
     </Card>
-    <div className="mock-side"><Card><CardHeader title="本场题源"/><div className="source-summary"><span><FileText/><b>{extractedLinks.reduce((sum, item) => sum + item.questions.length, 0)}<small>道网页面经题</small></b></span><span><Sparkles/><b>AI<small>简历动态出题</small></b></span><span><FileText/><b>{bankItems.length}<small>道个人题库题</small></b></span></div><button className="button button--secondary" onClick={() => navigate("/preparation")}>管理面经链接</button></Card><Card><CardHeader title="最近会话" subtitle="与面试复盘共用同一份本地记录"/><div className="recent-mocks">{sessions.slice(0, 5).map((item) => <button key={item.id} onClick={() => { if (item.status === "进行中") { setSessionId(item.id); setQuestionIndex(Math.max(0, Math.min(item.currentQuestionIndex, item.questions.length - 1))); } else { navigate(`/reviews?session=${item.id}`); } }}><span className="stat-icon purple">{item.status === "进行中" ? <RotateCcw/> : <Mic2/>}</span><span><strong>{item.type} · {item.round}</strong><small>{item.questions.length} 题 · {sessionTime(item.createdAt)}</small></span><Badge tone={item.status === "复盘完成" ? "green" : item.status === "待复盘" ? "orange" : "purple"}>{item.status === "进行中" ? "继续作答" : item.status}</Badge></button>)}</div></Card></div>
+    <div className="mock-side"><Card><CardHeader title="本场题源"/><div className="source-summary"><span><FileText/><b>{extractedLinks.reduce((sum, item) => sum + item.questions.length, 0)}<small>道网页面经题</small></b></span><span><Sparkles/><b>AI<small>简历动态出题</small></b></span><span><FileText/><b>{bankItems.length}<small>道个人题库题</small></b></span></div><button className="button button--secondary" onClick={() => navigate("/preparation")}>管理面经链接</button></Card><Card><CardHeader title="最近会话" subtitle="可以接着上次的进度继续作答"/><div className="recent-mocks">{sessions.slice(0, 5).map((item) => <button key={item.id} onClick={() => { if (item.status === "进行中") { setSessionId(item.id); setQuestionIndex(Math.max(0, Math.min(item.currentQuestionIndex, item.questions.length - 1))); } else { navigate(`/reviews?session=${item.id}`); } }}><span className="stat-icon purple">{item.status === "进行中" ? <RotateCcw/> : <Mic2/>}</span><span><strong>{item.type} · {item.round}</strong><small>{item.questions.length} 题 · {sessionTime(item.createdAt)}</small></span><Badge tone={item.status === "复盘完成" ? "green" : item.status === "待复盘" ? "orange" : "purple"}>{item.status === "进行中" ? "继续作答" : item.status}</Badge></button>)}</div></Card></div>
   </div>;
 }

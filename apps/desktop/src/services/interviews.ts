@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { hasLocalDatabase } from "./applications";
+import { listDemoQuestionBankItems } from "../data/demo";
 
 export interface InterviewQuestion {
   id: string;
@@ -62,16 +64,16 @@ export const updateInterviewSessionProgress = (id: string, questionIndex: number
 export const completeInterviewSession = async (id: string) =>
   mapSession(await invoke<StoredInterviewSession>("complete_interview_session", { id }));
 
-export const generateInterviewReview = async (id: string) =>
-  mapSession(await invoke<StoredInterviewSession>("generate_interview_review", { id }));
+export const generateInterviewReview = async (id: string, confirmAiSend: boolean) =>
+  mapSession(await invoke<StoredInterviewSession>("generate_interview_review", { id, confirmAiSend }));
 
-export const importInterviewTranscript = async (applicationId: string, transcript: string) =>
-  mapSession(await invoke<StoredInterviewSession>("import_interview_transcript", { applicationId, transcript }));
+export const importInterviewTranscript = async (applicationId: string, transcript: string, confirmAiSend: boolean) =>
+  mapSession(await invoke<StoredInterviewSession>("import_interview_transcript", { applicationId, transcript, confirmAiSend }));
 
 export const deleteInterviewSession = (id: string) =>
   invoke<void>("delete_interview_session", { id });
 
-export const listQuestionBankItems = () => invoke<QuestionBankItem[]>("list_question_bank_items");
+export const listQuestionBankItems = () => hasLocalDatabase ? invoke<QuestionBankItem[]>("list_question_bank_items") : listDemoQuestionBankItems();
 
 export const saveQuestionBankItem = (id: string | undefined, input: SaveQuestionBankInput) =>
   invoke<QuestionBankItem>("save_question_bank_item", { id, input });

@@ -5,6 +5,8 @@ import { Badge, Card, CardHeader } from "../../components/ui";
 import { useInterviewFlow } from "../../hooks/useInterviewFlow";
 import { hasLocalDatabase } from "../../services/applications";
 import { generateInterviewPreparation, getLatestInterviewPreparation, listApplicationAiCalls, type AiCallSummary, type StoredInterviewPreparation } from "../../services/ai";
+import { requestAiSendConfirmation } from "../../services/settings";
+import { openExternalUrl } from "../../services/external";
 
 const isValidWebUrl = (value: string) => {
   try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
@@ -139,7 +141,7 @@ export default function PreparationPage() {
   };
 
   const renderExtractedQuestions = (link: (typeof links)[number]) => <>
-    <div className="extracted-head"><strong>{link.source === "manual" ? "人工录入" : "提取到"} {link.questions.length} 道问题</strong>{link.url && <span className="extracted-head-actions"><button type="button" disabled={Boolean(analyzingId || questionSaving)} onClick={() => reanalyze(link.id)}><RefreshCw size={13}/>重新提取</button><a href={link.url} target="_blank" rel="noreferrer">查看原帖<ExternalLink size={13}/></a></span>}</div>
+    <div className="extracted-head"><strong>{link.source === "manual" ? "人工录入" : "提取到"} {link.questions.length} 道问题</strong>{link.url && <span className="extracted-head-actions"><button type="button" disabled={Boolean(analyzingId || questionSaving)} onClick={() => reanalyze(link.id)}><RefreshCw size={13}/>重新提取</button><a href={link.url} onClick={(event) => { event.preventDefault(); if (link.url) void openExternalUrl(link.url).catch((reason) => setExperienceError(String(reason))); }}>查看原帖<ExternalLink size={13}/></a></span>}</div>
     {link.questions.length ? <ol className="extracted-questions">{link.questions.map((question, index) => {
       const editing = questionEditor?.sourceId === link.id && questionEditor.index === index;
       const saving = questionSaving === `${link.id}:${index}`;
@@ -148,10 +150,11 @@ export default function PreparationPage() {
   </>;
 
   const generatePreparation = async () => {
-    if (hasLocalDatabase && selected.resumeName && !window.confirm(`将把“${selected.resumeName}”的结构化内容和当前岗位 JD 发送给已配置的 AI 服务，用于简历匹配与面试准备。是否继续？`)) return;
     setGenerating(true); setAiError("");
     try {
-      const generated = await generateInterviewPreparation(selected.id);
+      const confirmed = !selected.resumeName || await requestAiSendConfirmation(`将把”${selected.resumeName}”和岗位信息发给 AI 服务，用来匹配简历和面试准备。是否继续？`);
+      if (!confirmed) return;
+      const generated = await generateInterviewPreparation(selected.id, confirmed);
       setPreparation(generated);
       setAiCalls(await listApplicationAiCalls(selected.id));
     } catch (reason) { setAiError(String(reason)); } finally { setGenerating(false); }
@@ -173,32 +176,32 @@ export default function PreparationPage() {
 
     <div className="prep-detail">
       <div className="prep-position-head">
-        <div><Badge tone={selected.stageTone}>{selected.stage}</Badge><h2>{selected.company} · {selected.role}</h2><p>{selected.city} · 面经链接及提取题目仅归属于当前投递</p></div>
+        <div><Badge tone={selected.stageTone}>{selected.stage}</Badge><h2>{selected.company} · {selected.role}</h2><p>{selected.city} · 面经只关联当前岗位，不会混到其他投递中</p></div>
         <button className="button button--primary" onClick={() => navigate("/mock-interview")}><Play size={16}/>用此岗位开始模拟</button>
       </div>
 
       <Card className="ai-preparation-card">
-        <CardHeader title="AI 面试准备建议" subtitle="使用当前投递的 JD、关联简历与岗位上下文，结果和来源会保存在本地"/>
+        <CardHeader title="AI 面试准备建议" subtitle="根据岗位信息和简历为你生成个性化的面试准备建议"/>
         <div className="ai-preparation-toolbar"><div><Sparkles size={18}/><span>{preparation ? `上次生成：${new Date(preparation.createdAt).toLocaleString("zh-CN")} · ${preparation.model}` : "尚未生成真实建议"}</span></div><button className="button button--primary" disabled={generating} onClick={generatePreparation}><Sparkles size={15}/>{generating ? "生成中…" : preparation ? "重新生成" : "生成准备建议"}</button></div>
         {aiError && <p className="field-error ai-preparation-error">{aiError}</p>}
-        {!hasLocalDatabase && <p className="link-import-note">浏览器演示模式使用预置 AI 结果，不会发送任何真实简历或岗位数据。</p>}
+        {!hasLocalDatabase && <p className="link-import-note">当前为预览模式，展示的是示例数据，不会涉及你的真实信息。</p>}
         {preparation && <div className="ai-preparation-result">
           <p className="ai-preparation-summary">{preparation.content.summary}</p>
           {preparation.content.resumeMatch && <section className="ai-predicted-questions"><h3>简历匹配分析</h3><article><b>✓</b><div><strong>{preparation.content.resumeMatch.summary}</strong><p>匹配优势：{preparation.content.resumeMatch.strengths.join("；") || "暂无明确优势"}</p><p>表述风险：{preparation.content.resumeMatch.risks.join("；") || "暂未发现"}</p><small>建议准备证据：{preparation.content.resumeMatch.evidenceToPrepare.join("；") || "暂无"}</small></div></article></section>}
           <div className="ai-preparation-columns"><section><h3>重点准备</h3>{preparation.content.focusAreas.map((item) => <article key={item.title}><Badge tone={item.priority === "high" ? "red" : item.priority === "medium" ? "orange" : "blue"}>{item.priority === "high" ? "高" : item.priority === "medium" ? "中" : "低"}</Badge><div><strong>{item.title}</strong><p>{item.reason}</p></div></article>)}</section><section><h3>行动计划</h3>{preparation.content.actionPlan.map((item) => <article key={item.action}><span className="ai-action-time">{item.estimatedMinutes} 分钟</span><div><strong>{item.action}</strong></div></article>)}</section></div>
           <section className="ai-predicted-questions"><h3>预测问题</h3>{preparation.content.predictedQuestions.map((item, index) => <article key={`${index}-${item.question}`}><b>{index + 1}</b><div><strong>{item.question}</strong><p>{item.rationale}</p><small>依据：{item.sourceBasis.join(" · ")}</small></div></article>)}</section>
-          <div className="ai-trace"><span>调用 ID：{preparation.aiCallId.slice(0, 8)}</span><span>来源项：{preparation.sources.length}</span>{traceCall && <span>{traceCall.attempts} 次尝试 · {traceCall.durationMs ?? 0} ms</span>}</div>
+          <div className="ai-trace"><span>生成来源：{preparation.sources.length} 项</span>{traceCall && <span>耗时 {traceCall.durationMs ?? 0} ms</span>}</div>
         </div>}
       </Card>
 
       <Card className="link-import-card">
         <div className="experience-import-tabs"><button className={importMode === "link" ? "active" : ""} onClick={() => setImportMode("link")}><Link2 size={15}/>网页链接</button><button className={importMode === "manual" ? "active" : ""} onClick={() => setImportMode("manual")}><PencilLine size={15}/>人工录入</button></div>
-        {importMode === "link" ? <><CardHeader title="导入网页面经" subtitle="粘贴公开帖子链接，导入后将自动读取正文、提取问题并去重"/><div className="link-import-form">
+        {importMode === "link" ? <><CardHeader title="导入网页面经" subtitle="粘贴面经帖子的链接，系统会自动提取里面的面试问题"/><div className="link-import-form">
           <div className={`url-field ${urlTouched && !validUrl ? "invalid" : ""}`}><Link2 size={17}/><input value={url} onBlur={() => setUrlTouched(true)} onChange={(event) => setUrl(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") submitLink(); }} placeholder="https://www.nowcoder.com/discuss/..."/></div>
           <button className="button button--primary" disabled={importing || !validUrl} onClick={submitLink}>{importing && <LoaderCircle className="spin" size={15}/>} {importing ? "导入并分析中…" : "导入链接"}</button>
         </div>
         {urlTouched && url && !validUrl && <p className="field-error">请输入以 http:// 或 https:// 开头的有效网页地址</p>}
-        <p className="link-import-note">桌面端只在本机保存链接和提取结果；需要登录、验证码或仅 App 可见的帖子请改用人工录入。</p></> : <><CardHeader title="人工录入面经" subtitle="适合整理聊天记录、评论区内容或无法直接访问的帖子"/><div className="manual-experience-form"><label><span>来源名称（可选）</span><input value={manualTitle} onChange={(event) => setManualTitle(event.target.value)} placeholder="例如：朋友分享的蚂蚁一面问题"/></label><label><span>面试问题</span><textarea rows={6} value={manualQuestions} onChange={(event) => setManualQuestions(event.target.value)} placeholder={"每行输入一道问题，例如：\n如何保证消息不重复消费？\n介绍一下你负责的订单系统。"}/><small>已识别 {parsedManualQuestions.length} 道题</small></label><button className="button button--primary" disabled={importing || !parsedManualQuestions.length} onClick={submitManual}>{importing ? "保存中…" : "保存人工面经"}</button></div></>}
+        <p className="link-import-note">链接内容只在本地保存；如果帖子需要登录才能看，请改用人工录入。</p></> : <><CardHeader title="人工录入面经" subtitle="把聊天记录或笔记里的面试题整理成题单"/><div className="manual-experience-form"><label><span>来源名称（可选）</span><input value={manualTitle} onChange={(event) => setManualTitle(event.target.value)} placeholder="例如：朋友分享的蚂蚁一面问题"/></label><label><span>面试问题</span><textarea rows={6} value={manualQuestions} onChange={(event) => setManualQuestions(event.target.value)} placeholder={"每行输入一道问题，例如：\n如何保证消息不重复消费？\n介绍一下你负责的订单系统。"}/><small>已识别 {parsedManualQuestions.length} 道题</small></label><button className="button button--primary" disabled={importing || !parsedManualQuestions.length} onClick={submitManual}>{importing ? "保存中…" : "保存人工面经"}</button></div></>}
       </Card>
 
       <Card className="experience-links-card">
@@ -212,7 +215,7 @@ export default function PreparationPage() {
               <ChevronRight size={16}/>
             </button><button className="experience-delete-button" aria-label={`删除 ${link.title}`} title="删除该面经来源" disabled={deletingId === link.id} onClick={() => removeExperience(link.id, link.title)}>{deletingId === link.id ? <LoaderCircle className="spin" size={15}/> : <Trash2 size={15}/>}</button></div>
           {expandedLinkId === link.id && <div className="experience-link-detail">
-            {link.status === "待分析" || analyzingId === link.id ? <div className="analysis-pending"><LoaderCircle className={analyzingId === link.id ? "spin" : ""} size={21}/><div><strong>{analyzingId === link.id ? "正在读取并分析网页" : "等待网页分析"}</strong><p>将从原帖正文中识别面试问题并自动去重。</p></div>{analyzingId !== link.id && <button className="button button--secondary" onClick={() => retryAnalysis(link.id)}><Sparkles size={15}/>开始分析</button>}</div> : link.status === "分析失败" ? <div className="analysis-pending analysis-failed"><Sparkles size={21}/><div><strong>没有完成提取</strong><p>{link.errorMessage || "网页无法访问或未识别到面试问题。"}</p></div><button className="button button--secondary" onClick={() => retryAnalysis(link.id)}><Sparkles size={15}/>重试</button></div> : renderExtractedQuestions(link)}
+            {link.status === "待分析" || analyzingId === link.id ? <div className="analysis-pending"><LoaderCircle className={analyzingId === link.id ? "spin" : ""} size={21}/><div><strong>{analyzingId === link.id ? "正在读取并分析网页" : "等待网页分析"}</strong><p>系统会读取原帖内容，自动提取其中的面试问题。</p></div>{analyzingId !== link.id && <button className="button button--secondary" onClick={() => retryAnalysis(link.id)}><Sparkles size={15}/>开始分析</button>}</div> : link.status === "分析失败" ? <div className="analysis-pending analysis-failed"><Sparkles size={21}/><div><strong>没有完成提取</strong><p>{link.errorMessage || "网页无法访问或未识别到面试问题。"}</p></div><button className="button button--secondary" onClick={() => retryAnalysis(link.id)}><Sparkles size={15}/>重试</button></div> : renderExtractedQuestions(link)}
           </div>}
         </article>) : <div className="experience-empty"><Link2 size={26}/><p>还没有面经来源，导入帖子或人工录入后即可用于模拟面试。</p></div>}</div>
       </Card>
