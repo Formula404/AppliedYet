@@ -1,6 +1,27 @@
 <div align="center">
   <img src="docs/images/icon.png" width="112" alt="投了吗应用图标" />
 
+  <p>
+    <a href="https://github.com/Formula404/AppliedYet/releases"><img src="https://img.shields.io/github/v/release/Formula404/AppliedYet?include_prereleases&sort=semver&style=flat&logo=github&label=release" alt="GitHub Release" /></a>
+    <a href="https://github.com/Formula404/AppliedYet/actions/workflows/publish-windows.yml"><img src="https://img.shields.io/github/actions/workflow/status/Formula404/AppliedYet/publish-windows.yml?style=flat&logo=githubactions&logoColor=white&label=Windows%20build" alt="Windows build status" /></a>
+    <img src="https://img.shields.io/badge/React-18-61DAFB?style=flat&logo=react&logoColor=white" alt="React 18" />
+    <img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat&logo=typescript&logoColor=white" alt="TypeScript 5.6" />
+    <img src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat&logo=tauri&logoColor=white" alt="Tauri 2" />
+    <img src="https://img.shields.io/badge/Rust-stable-000000?style=flat&logo=rust&logoColor=white" alt="Rust stable" />
+    <img src="https://img.shields.io/badge/SQLite-local--first-003B57?style=flat&logo=sqlite&logoColor=white" alt="SQLite local-first" />
+    <img src="https://img.shields.io/badge/platform-Windows-0078D4?style=flat&logo=windows11&logoColor=white" alt="Windows" />
+  </p>
+
+# 投了吗 · Applied Yet?
+
+**把散落在表格、邮件和脑海里的求职进度，放进一张清晰的地图。**
+
+一款面向 Windows 的本地优先求职工作台：从投递记录、招聘邮件和面试日程，
+到模拟面试、Offer 对比与求职复盘，一处管理，随时掌握下一步。
+
+[查看最新版本](https://github.com/Formula404/AppliedYet/releases/latest) · [反馈问题](https://github.com/Formula404/AppliedYet/issues) · [参与开发](#参与开发)
+</div>
+
 ![投了吗产品概览](docs/images/cover.png)
 
 ## 求职已经够复杂，管理进度不该再添麻烦
