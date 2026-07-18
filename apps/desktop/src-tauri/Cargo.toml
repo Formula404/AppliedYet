@@ -1,6 +1,6 @@
 [package]
 name = "tou-le-ma"
-version = "0.2.0"
+version = "0.3.0"
 description = "投了吗 - 本地优先的个人求职工作台"
 authors = ["TouLeMa Contributors"]
 edition = "2021"
