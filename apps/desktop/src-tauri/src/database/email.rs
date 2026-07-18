@@ -1330,7 +1330,7 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
                             || matches!(character, '的' | '“' | '”' | '"' | ':' | '：')
                     })
                     .to_string();
-                if role.chars().count() >= 2 && role.chars().count() <= 40 {
+                if looks_like_role(&role) {
                     return Some(role);
                 }
             }
@@ -1343,14 +1343,26 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
         .trim()
         .to_string();
     for suffix in [
+        "面试通过及后续安排",
         "技术一面安排",
         "技术二面安排",
         "技术三面安排",
+        "业务一面安排",
+        "业务二面安排",
+        "HR 面试安排",
+        "HR面试安排",
+        "一面安排",
+        "二面安排",
+        "三面安排",
+        "终面安排",
         "视频面试安排",
         "技术面试安排",
         "面试安排通知",
+        "面试安排",
         "线上面试邀请",
+        "视频面试邀请",
         "面试邀请",
+        "面试通知",
         "技术一面",
         "技术二面",
         "技术三面",
@@ -1365,13 +1377,42 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
         "视频沟通",
         "技术沟通",
         "在线测评邀请",
+        "在线测评通知",
+        "测评通知",
         "测评邀请",
+        "在线测评",
+        "机试邀请",
+        "机试通知",
         "笔试邀请",
+        "笔试通知",
+        "沟通邀请",
+        "沟通安排",
+        "后续安排",
+        "招聘流程更新",
+        "招聘进展通知",
+        "申请状态更新",
+        "申请进展通知",
+        "结果通知",
         "申请成功",
         "投递成功",
     ] {
-        candidate = candidate.trim_end_matches(suffix).trim().to_string();
+        candidate = candidate
+            .trim_end_matches(suffix)
+            .trim_end_matches(|character: char| {
+                character.is_whitespace()
+                    || matches!(
+                        character,
+                        '-' | '–' | '—' | '_' | '·' | '|' | '｜' | ':' | '：' | '/' | '\\'
+                    )
+            })
+            .to_string();
     }
+    candidate = candidate
+        .trim_start_matches("关于")
+        .trim_start_matches("应聘")
+        .trim_end_matches('的')
+        .trim()
+        .to_string();
     if looks_like_role(&candidate) {
         Some(candidate)
     } else {
@@ -1380,32 +1421,92 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
 }
 
 fn looks_like_role(candidate: &str) -> bool {
-    let normalized = candidate.to_lowercase();
-    candidate.chars().count() >= 2
-        && candidate.chars().count() <= 40
-        && [
-            "工程师",
-            "开发",
-            "研发",
-            "算法",
-            "产品",
-            "运营",
-            "设计",
-            "测试",
-            "实习",
-            "后端",
-            "前端",
-            "数据",
-            "java",
-            "python",
-            "全栈",
-            "架构",
-            "安全",
-            "运维",
-            "分析",
-        ]
+    let candidate = candidate.trim();
+    let length = candidate.chars().count();
+    if !(2..=40).contains(&length)
+        || candidate.contains(['\n', '\r', '@'])
+        || candidate.to_lowercase().contains("http")
+        || candidate
+            .chars()
+            .any(|character| matches!(character, '。' | '！' | '？' | '；' | '，'))
+        || candidate.chars().all(|character| {
+            character.is_ascii_digit()
+                || character.is_whitespace()
+                || matches!(character, '-' | '_' | '/' | '\\')
+        })
+    {
+        return false;
+    }
+
+    let normalized = normalize(candidate);
+    let noise_phrases = [
+        "通知",
+        "邀请",
+        "面试",
+        "面试通知",
+        "面试邀请",
+        "面试安排",
+        "在线测评",
+        "测评通知",
+        "测评邀请",
+        "笔试通知",
+        "笔试邀请",
+        "招聘",
+        "招聘通知",
+        "招聘进展",
+        "招聘流程",
+        "招聘流程更新",
+        "应聘反馈",
+        "投递反馈",
+        "投递进展",
+        "申请状态",
+        "申请状态更新",
+        "申请进展",
+        "流程更新",
+        "结果通知",
+        "后续安排",
+        "申请成功",
+        "投递成功",
+        "录用通知",
+        "候选人中心",
+        "消息提醒",
+    ];
+    let sentence_prefixes = [
+        "您好",
+        "你好",
+        "恭喜",
+        "感谢",
+        "请您",
+        "请你",
+        "邀请您",
+        "邀请你",
+        "我们",
+        "您的",
+        "你的",
+    ];
+    let company_suffixes = [
+        "有限公司",
+        "股份公司",
+        "集团",
+        "公司",
+        "科技",
+        "银行",
+        "证券",
+        "大学",
+        "学院",
+        "学校",
+        "医院",
+    ];
+
+    !noise_phrases
         .iter()
-        .any(|word| normalized.contains(word))
+        .any(|noise| normalized == normalize(noise))
+        && !sentence_prefixes
+            .iter()
+            .any(|prefix| candidate.starts_with(prefix))
+        && !company_suffixes
+            .iter()
+            .any(|suffix| candidate.ends_with(suffix))
 }
 
 fn normalize(value: &str) -> String {
@@ -1593,6 +1694,30 @@ mod tests {
             extract_role("全栈架构师技术沟通", "").as_deref(),
             Some("全栈架构师")
         );
+        assert_eq!(
+            extract_role("财务管培生一面安排", "").as_deref(),
+            Some("财务管培生")
+        );
+        assert_eq!(
+            extract_role("市场营销岗测评通知", "").as_deref(),
+            Some("市场营销岗")
+        );
+        assert_eq!(
+            extract_role("关于高级会计的面试邀请", "").as_deref(),
+            Some("高级会计")
+        );
+        assert_eq!(
+            extract_role("供应链采购专员 - 笔试通知", "").as_deref(),
+            Some("供应链采购专员")
+        );
+        assert_eq!(
+            extract_role("申请进展", "您已投递临床研究岗位，请等待后续通知。").as_deref(),
+            Some("临床研究")
+        );
+        assert_eq!(extract_role("招聘流程更新", ""), None);
+        assert_eq!(extract_role("面试邀请", ""), None);
+        assert_eq!(extract_role("示例科技面试邀请", ""), None);
+        assert_eq!(extract_role("恭喜您进入下一轮面试邀请", ""), None);
     }
 
     #[test]
