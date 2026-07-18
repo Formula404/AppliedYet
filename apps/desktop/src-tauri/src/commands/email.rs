@@ -1,16 +1,20 @@
 use crate::{
     credentials,
-    db::{Database, EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult},
+    db::{
+        Database, EmailLink, EmailMessage, EmailStats, EmailSyncCursor, EmailSyncFailure, RawEmail,
+        SyncResult,
+    },
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use mailparse::MailHeaderMap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     panic::{catch_unwind, AssertUnwindSafe},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tauri_plugin_opener::OpenerExt;
@@ -24,7 +28,41 @@ enum EmailAuth {
 struct FetchBatch {
     messages: Vec<RawEmail>,
     highest_uid: Option<u32>,
+    uid_validity: Option<u32>,
+    failures: Vec<EmailSyncFailure>,
     scanned: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccountSyncResult {
+    account: String,
+    status: String,
+    fetched: usize,
+    recognized: usize,
+    matched: usize,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EmailSyncSummary {
+    fetched: usize,
+    recognized: usize,
+    matched: usize,
+    success_count: usize,
+    failed_count: usize,
+    accounts: Vec<AccountSyncResult>,
+}
+
+static EMAIL_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct SyncGuard;
+
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        EMAIL_SYNC_RUNNING.store(false, Ordering::Release);
+    }
 }
 
 struct XOAuth2 {
@@ -60,7 +98,16 @@ pub(crate) fn get_email_stats(db: tauri::State<'_, Database>) -> Result<EmailSta
 }
 
 #[tauri::command]
-pub(crate) async fn sync_emails(db: tauri::State<'_, Database>) -> Result<SyncResult, String> {
+pub(crate) async fn sync_emails(
+    db: tauri::State<'_, Database>,
+) -> Result<EmailSyncSummary, String> {
+    if EMAIL_SYNC_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("邮件正在检查中，请稍后查看结果".into());
+    }
+    let _guard = SyncGuard;
     let settings = db.get_provider_settings()?.email;
     let accounts = settings.active_accounts();
     if accounts.is_empty() {
@@ -71,7 +118,9 @@ pub(crate) async fn sync_emails(db: tauri::State<'_, Database>) -> Result<SyncRe
         recognized: 0,
         matched: 0,
     };
-    let mut errors = Vec::new();
+    let mut account_results = Vec::new();
+    let mut success_count = 0;
+    let mut failed_count = 0;
     for account_settings in accounts {
         let account_label = if account_settings.name.trim().is_empty() {
             account_settings.email_address.clone()
@@ -80,21 +129,40 @@ pub(crate) async fn sync_emails(db: tauri::State<'_, Database>) -> Result<SyncRe
         };
         match sync_email_account(&db, account_settings).await {
             Ok(result) => {
+                success_count += 1;
                 total.fetched += result.fetched;
                 total.recognized += result.recognized;
                 total.matched += result.matched;
+                account_results.push(AccountSyncResult {
+                    account: account_label,
+                    status: "success".into(),
+                    fetched: result.fetched,
+                    recognized: result.recognized,
+                    matched: result.matched,
+                    reason: None,
+                });
             }
-            Err(error) => errors.push(format!("{account_label}：{error}")),
+            Err(error) => {
+                failed_count += 1;
+                account_results.push(AccountSyncResult {
+                    account: account_label,
+                    status: "failed".into(),
+                    fetched: 0,
+                    recognized: 0,
+                    matched: 0,
+                    reason: Some(error),
+                });
+            }
         }
     }
-    if !errors.is_empty() {
-        return Err(format!(
-            "部分邮箱检查失败（已读取 {} 封）：{}",
-            total.fetched,
-            errors.join("；")
-        ));
-    }
-    Ok(total)
+    Ok(EmailSyncSummary {
+        fetched: total.fetched,
+        recognized: total.recognized,
+        matched: total.matched,
+        success_count,
+        failed_count,
+        accounts: account_results,
+    })
 }
 
 async fn sync_email_account(
@@ -134,10 +202,13 @@ async fn sync_email_account(
     } else {
         settings.email_address.clone()
     };
-    let last_uid = db.latest_email_uid(&account)?;
+    let cursor = db.email_sync_cursor(&account)?;
+    let retry_uids = db.retryable_email_uids(&account)?;
     let batch = tauri::async_runtime::spawn_blocking(move || {
-        catch_unwind(AssertUnwindSafe(|| fetch_imap(settings, auth, last_uid)))
-            .map_err(|_| "IMAP 客户端处理服务器响应时异常退出，请检查服务商兼容性".to_string())?
+        catch_unwind(AssertUnwindSafe(|| {
+            fetch_imap(settings, auth, cursor, retry_uids)
+        }))
+        .map_err(|_| "IMAP 客户端处理服务器响应时异常退出，请检查服务商兼容性".to_string())?
     })
     .await
     .map_err(|error| format!("邮件检查任务失败: {error}"))??;
@@ -151,7 +222,9 @@ async fn sync_email_account(
             })
             .collect(),
         &account,
-        batch.highest_uid,
+        batch.highest_uid.or(Some(cursor.last_uid)),
+        batch.uid_validity,
+        batch.failures,
         batch.scanned,
     )
 }
@@ -232,6 +305,33 @@ pub(crate) fn attach_email_to_application(
 }
 
 #[tauri::command]
+pub(crate) fn review_email(
+    db: tauri::State<'_, Database>,
+    email_id: String,
+    application_id: String,
+    category: String,
+    suggested_stage: Option<String>,
+) -> Result<(), String> {
+    db.review_email(
+        &email_id,
+        &application_id,
+        &category,
+        suggested_stage.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub(crate) fn create_email_calendar_task(
+    db: tauri::State<'_, Database>,
+    email_id: String,
+    title: String,
+    due_at: String,
+    remind_at: Option<String>,
+) -> Result<crate::db::ApplicationTask, String> {
+    db.create_email_calendar_task(&email_id, title, due_at, remind_at)
+}
+
+#[tauri::command]
 pub(crate) fn create_application_from_email(
     db: tauri::State<'_, Database>,
     email_id: String,
@@ -243,7 +343,8 @@ pub(crate) fn create_application_from_email(
 fn fetch_imap(
     settings: crate::db::EmailAccountSettings,
     auth: EmailAuth,
-    last_uid: u32,
+    cursor: EmailSyncCursor,
+    retry_uids: Vec<u32>,
 ) -> Result<FetchBatch, String> {
     let host = settings.imap_host.trim().to_string();
     let username = settings.username.trim().to_string();
@@ -266,14 +367,14 @@ fn fetch_imap(
                 .read_greeting()
                 .map_err(|error| format!("初始化 IMAP 会话失败: {error}"))?;
             let mut session = authenticate(client, &username, auth)?;
-            let result = fetch_session(&mut session, &settings.email_address, last_uid);
+            let result = fetch_session(&mut session, &settings.email_address, cursor, &retry_uids);
             let _ = session.logout();
             result
         } else {
             let client = imap::connect((host.as_str(), port), &host, &tls)
                 .map_err(|error| format!("无法连接 IMAP 服务器: {error}"))?;
             let mut session = authenticate(client, &username, auth)?;
-            let result = fetch_session(&mut session, &settings.email_address, last_uid);
+            let result = fetch_session(&mut session, &settings.email_address, cursor, &retry_uids);
             let _ = session.logout();
             result
         }
@@ -293,7 +394,7 @@ fn fetch_imap(
                 .read_greeting()
                 .map_err(|error| format!("初始化 IMAP 会话失败: {error}"))?;
             let mut session = authenticate(client, &username, auth)?;
-            let result = fetch_session(&mut session, &settings.email_address, last_uid);
+            let result = fetch_session(&mut session, &settings.email_address, cursor, &retry_uids);
             let _ = session.logout();
             result
         } else {
@@ -302,7 +403,7 @@ fn fetch_imap(
                 .read_greeting()
                 .map_err(|error| format!("读取 IMAP 欢迎消息失败: {error}"))?;
             let mut session = authenticate(client, &username, auth)?;
-            let result = fetch_session(&mut session, &settings.email_address, last_uid);
+            let result = fetch_session(&mut session, &settings.email_address, cursor, &retry_uids);
             let _ = session.logout();
             result
         }
@@ -619,15 +720,21 @@ async fn request_token(
 fn fetch_session<T: Read + Write>(
     session: &mut imap::Session<T>,
     account: &str,
-    last_uid: u32,
+    cursor: EmailSyncCursor,
+    retry_uids: &[u32],
 ) -> Result<FetchBatch, String> {
     const MAX_EMAIL_BYTES: u32 = 10 * 1024 * 1024;
-    session.select("INBOX").map_err(|error| {
+    let mailbox = session.select("INBOX").map_err(|error| {
         let detail = error.to_string();
         if detail.to_ascii_lowercase().contains("unsafe login") {
             "网易邮箱仍将本次连接判定为不安全登录。请确认已开启 IMAP、使用客户端授权码而非网页登录密码，并在网页版或邮箱大师中完成第三方登录安全验证；若仍失败请联系 kefu@188.com。".to_string()
         } else { format!("无法打开收件箱: {detail}") }
     })?;
+    let uid_validity = mailbox.uid_validity;
+    let validity_changed = cursor.uid_validity.is_some()
+        && uid_validity.is_some()
+        && cursor.uid_validity != uid_validity;
+    let last_uid = if validity_changed { 0 } else { cursor.last_uid };
     let query = if last_uid == 0 {
         "ALL".to_string()
     } else {
@@ -637,40 +744,92 @@ fn fetch_session<T: Read + Write>(
         .uid_search(query)
         .map_err(|error| format!("无法查询新邮件: {error}"))?;
     let mut uids: Vec<u32> = found.into_iter().filter(|uid| *uid > last_uid).collect();
+    if !validity_changed {
+        uids.extend(retry_uids.iter().copied());
+    }
     uids.sort_unstable();
+    uids.dedup();
     if last_uid == 0 && uids.len() > 100 {
         uids = uids.split_off(uids.len() - 100);
     }
     let highest_uid = uids.last().copied();
+    let scanned = uids.len();
     let mut messages = Vec::new();
+    let mut failures = Vec::new();
     for uid in uids {
-        let sizes = session
-            .uid_fetch(uid.to_string(), "(UID RFC822.SIZE)")
-            .map_err(|error| format!("读取邮件 {uid} 大小失败: {error}"))?;
+        let sizes = match session.uid_fetch(uid.to_string(), "(UID RFC822.SIZE)") {
+            Ok(value) => value,
+            Err(error) => {
+                failures.push(EmailSyncFailure {
+                    uid,
+                    reason: format!("读取邮件大小失败: {error}"),
+                    permanently_skipped: false,
+                });
+                continue;
+            }
+        };
         let declared_size = sizes
             .iter()
             .find(|item| item.uid == Some(uid))
             .or_else(|| sizes.iter().next())
             .and_then(|item| item.size);
         if declared_size.is_some_and(|size| size > MAX_EMAIL_BYTES) {
+            failures.push(EmailSyncFailure {
+                uid,
+                reason: "邮件超过 10 MiB 安全限制".into(),
+                permanently_skipped: true,
+            });
             continue;
         }
-        let fetched = session
-            .uid_fetch(uid.to_string(), "(UID RFC822)")
-            .map_err(|error| format!("读取邮件 {uid} 失败: {error}"))?;
+        let fetched = match session.uid_fetch(uid.to_string(), "(UID RFC822)") {
+            Ok(value) => value,
+            Err(error) => {
+                failures.push(EmailSyncFailure {
+                    uid,
+                    reason: format!("读取邮件内容失败: {error}"),
+                    permanently_skipped: false,
+                });
+                continue;
+            }
+        };
         let Some(fetch) = fetched
             .iter()
             .find(|item| item.uid == Some(uid))
             .or_else(|| fetched.iter().next())
         else {
+            failures.push(EmailSyncFailure {
+                uid,
+                reason: "服务器未返回邮件内容".into(),
+                permanently_skipped: false,
+            });
             continue;
         };
-        let Some(body) = fetch.body() else { continue };
+        let Some(body) = fetch.body() else {
+            failures.push(EmailSyncFailure {
+                uid,
+                reason: "邮件正文为空".into(),
+                permanently_skipped: false,
+            });
+            continue;
+        };
         if body.len() > MAX_EMAIL_BYTES as usize {
+            failures.push(EmailSyncFailure {
+                uid,
+                reason: "邮件实际内容超过 10 MiB 安全限制".into(),
+                permanently_skipped: true,
+            });
             continue;
         }
-        let Ok(parsed) = mailparse::parse_mail(body) else {
-            continue;
+        let parsed = match mailparse::parse_mail(body) {
+            Ok(value) => value,
+            Err(error) => {
+                failures.push(EmailSyncFailure {
+                    uid,
+                    reason: format!("邮件格式解析失败: {error}"),
+                    permanently_skipped: false,
+                });
+                continue;
+            }
         };
         let sender = parsed.headers.get_first_value("From").unwrap_or_default();
         let subject = parsed
@@ -692,7 +851,9 @@ fn fetch_session<T: Read + Write>(
         }
         messages.push(RawEmail {
             account: account.into(),
-            mailbox: "INBOX".into(),
+            mailbox: uid_validity
+                .map(|value| format!("INBOX:{value}"))
+                .unwrap_or_else(|| "INBOX".into()),
             uid,
             message_id,
             sender,
@@ -702,11 +863,12 @@ fn fetch_session<T: Read + Write>(
             links,
         });
     }
-    let fetched = messages.len();
     Ok(FetchBatch {
         messages,
-        highest_uid,
-        scanned: fetched,
+        highest_uid: highest_uid.or(if validity_changed { Some(0) } else { None }),
+        uid_validity,
+        failures,
+        scanned,
     })
 }
 

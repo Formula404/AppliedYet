@@ -28,7 +28,7 @@ export interface MailItem {
   type: string;
   time: string;
   confidence: number;
-  status: "已更新流程" | "待确认" | "已自动匹配";
+  status: "已处理" | "待确认" | "已自动匹配";
 }
 
 export interface TaskItemData {

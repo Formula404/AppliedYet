@@ -11,7 +11,9 @@ mod email;
 mod interviews;
 mod migrations;
 pub mod models;
-pub use email::{EmailLink, EmailMessage, EmailStats, RawEmail, SyncResult};
+pub use email::{
+    EmailLink, EmailMessage, EmailStats, EmailSyncCursor, EmailSyncFailure, RawEmail, SyncResult,
+};
 pub use interviews::{
     CreateInterviewQuestion, InterviewQuestionReview, InterviewSessionRecord, QuestionBankItem,
 };
@@ -1323,9 +1325,9 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
-        let (application_id, stage_before, stage_after, reversible, reverted_at) = transaction.query_row(
-            "SELECT application_id, stage_before, stage_after, reversible, reverted_at FROM application_events WHERE id = ?1",
-            [event_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, bool>(3)?, row.get::<_, Option<String>>(4)?)),
+        let (application_id, stage_before, stage_after, reversible, reverted_at, source_type, source_id) = transaction.query_row(
+            "SELECT application_id, stage_before, stage_after, reversible, reverted_at, source_type, source_id FROM application_events WHERE id = ?1",
+            [event_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, bool>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, Option<String>>(6)?)),
         ).optional().map_err(db_error)?.ok_or_else(|| "事件不存在".to_string())?;
         if !reversible || reverted_at.is_some() {
             return Err("该事件不可撤销或已经撤销".to_string());
@@ -1347,6 +1349,18 @@ impl Database {
             "UPDATE applications SET current_stage = ?2, status_updated_at = ?3, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
             params![application_id, effective_stage, effective_time],
         ).map_err(db_error)?;
+        if source_type == "email" {
+            if let Some(email_id) = source_id {
+                transaction
+                    .execute(
+                        "UPDATE email_messages
+                     SET status='pending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                     WHERE id=?1 AND status='confirmed'",
+                        [email_id],
+                    )
+                    .map_err(db_error)?;
+            }
+        }
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.get_application_detail(&application_id)

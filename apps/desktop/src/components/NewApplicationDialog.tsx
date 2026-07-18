@@ -16,6 +16,7 @@ interface NewApplicationDialogProps {
   description?: string;
   emailStage?: string;
   requireAppliedAt?: boolean;
+  maxAppliedAt?: string;
   saving: boolean;
   onClose: () => void;
   onSubmit: (input: CreateApplicationInput) => Promise<Application>;
@@ -27,6 +28,7 @@ export function NewApplicationDialog({
   description = "先记录核心信息，稍后可继续完善岗位档案",
   emailStage,
   requireAppliedAt = false,
+  maxAppliedAt,
   saving,
   onClose,
   onSubmit,
@@ -88,7 +90,7 @@ export function NewApplicationDialog({
             <label><span>招聘类型</span><select name="recruitmentType"><option value="">未设置</option><option>校招</option><option>实习</option><option>社招</option></select></label>
             <label><span>岗位编号</span><input name="jobCode" /></label>
             <label><span>投递渠道</span><select name="channel" defaultValue={defaults?.channel ?? "招聘官网"}><option>招聘官网</option><option>Boss 直聘</option><option>内推</option><option>邮件识别</option><option>其他</option></select></label>
-            <label><span>投递日期{requireAppliedAt ? " *" : ""}</span><input name="appliedAt" type="date" required={requireAppliedAt} defaultValue={defaults?.appliedAt ?? new Date().toLocaleDateString("en-CA")} /></label>
+            <label><span>投递日期{requireAppliedAt ? " *" : ""}</span><input name="appliedAt" type="date" required={requireAppliedAt} max={maxAppliedAt} defaultValue={defaults?.appliedAt ?? new Date().toLocaleDateString("en-CA")} /></label>
             <label><span>优先级</span><select name="priority" defaultValue="2"><option value="3">高</option><option value="2">中</option><option value="1">普通</option></select></label>
             <label><span>使用简历</span><select key={resumes.map((item) => item.id).join("|")} name="resumeProfileId" defaultValue={resumes.find((item) => item.isPrimary)?.id ?? ""}><option value="">暂不关联</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>{resume.name}{resume.targetDirection ? ` · ${resume.targetDirection}` : ""}{resume.isPrimary ? "（默认）" : ""}</option>)}</select></label>
             <label><span>公司官网</span><input name="website" type="url" placeholder="https://" /></label>

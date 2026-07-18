@@ -40,10 +40,10 @@ export const applications: Application[] = [
 ];
 
 export const mails: MailItem[] = [
-  { id: "m1", company: "蚂蚁集团", role: "后端开发工程师", subject: "面试安排通知", summary: "您好，感谢您投递蚂蚁集团，邀请您参加技术一面…", type: "面试安排", time: "今天 09:15", confidence: 98, status: "已更新流程" },
+  { id: "m1", company: "蚂蚁集团", role: "后端开发工程师", subject: "面试安排通知", summary: "您好，感谢您投递蚂蚁集团，邀请您参加技术一面…", type: "面试安排", time: "今天 09:15", confidence: 98, status: "已处理" },
   { id: "m2", company: "字节跳动", role: "研发工程师", subject: "面试结果及后续安排", summary: "您的简历已通过本轮面试，后续面试时间将另行通知…", type: "面试通过", time: "昨天", confidence: 94, status: "已自动匹配" },
   { id: "m3", company: "美团", role: "Java 开发工程师", subject: "沟通邀请", summary: "想和您沟通一下目前的求职进展和岗位匹配情况…", type: "HR 沟通", time: "5 月 18 日", confidence: 76, status: "待确认" },
-  { id: "m4", company: "Shopee", role: "平台开发工程师", subject: "Online Assessment Reminder", summary: "This is a reminder that your online assessment will expire soon…", type: "测评提醒", time: "5 月 18 日", confidence: 91, status: "已更新流程" },
+  { id: "m4", company: "Shopee", role: "平台开发工程师", subject: "Online Assessment Reminder", summary: "This is a reminder that your online assessment will expire soon…", type: "测评提醒", time: "5 月 18 日", confidence: 91, status: "已处理" },
 ];
 
 export const todayTasks: TaskItemData[] = [

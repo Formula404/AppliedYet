@@ -268,16 +268,19 @@ export default function ApplicationDetailPage() {
   };
 
   const undoEvent = async (item: ApplicationEvent) => {
-    if (!window.confirm(`撤销“${item.stageBefore} → ${item.stageAfter}”这次阶段变更吗？`)) return;
+    const fromEmail = item.sourceType === "email";
+    if (!window.confirm(`撤销“${item.stageBefore} → ${item.stageAfter}”这次阶段变更吗？${fromEmail ? "\n对应邮件会恢复为待处理状态。" : ""}`)) return;
     const scrollPosition = window.scrollY;
     try {
       if (hasLocalDatabase) {
         setDetail(await revertApplicationEvent(item.id));
         await refreshApplications();
+        if (fromEmail) window.dispatchEvent(new Event("email-index-changed"));
       } else if (detail && item.stageBefore) {
         setDetail({ ...detail, currentStage: item.stageBefore, events: detail.events.map((event) => event.id === item.id ? { ...event, revertedAt: new Date().toISOString() } : event) });
       }
       requestAnimationFrame(() => window.scrollTo({ top: scrollPosition, behavior: "instant" }));
+      if (fromEmail && window.confirm("已撤销该邮件造成的流程变更。是否现在重新选择关联岗位或阶段？")) navigate("/emails");
     } catch (reason) { setError(String(reason)); }
   };
 

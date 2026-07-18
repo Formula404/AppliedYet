@@ -1,5 +1,6 @@
 use super::{
-    create_application_record, db_error, ApplicationListItem, CreateApplicationInput, Database,
+    clean_timestamp, create_application_record, db_error, query_tasks, required,
+    validate_task_times, ApplicationListItem, ApplicationTask, CreateApplicationInput, Database,
 };
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
@@ -16,6 +17,19 @@ pub struct RawEmail {
     pub received_at: String,
     pub body_text: String,
     pub links: Vec<EmailLink>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailSyncFailure {
+    pub uid: u32,
+    pub reason: String,
+    pub permanently_skipped: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EmailSyncCursor {
+    pub last_uid: u32,
+    pub uid_validity: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -44,6 +58,7 @@ pub struct EmailMessage {
     pub current_stage: Option<String>,
     pub confidence: i64,
     pub reasons: Vec<String>,
+    pub calendar_task_created: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,9 +68,10 @@ pub struct EmailStats {
     pub pending: i64,
     pub confirmed: i64,
     pub unmatched: i64,
+    pub last_synced_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult {
     pub fetched: usize,
@@ -72,22 +88,63 @@ struct MatchCandidate {
     id: String,
     score: i64,
     reasons: Vec<String>,
+    safe_to_attach: bool,
 }
 
+type EmailConfirmationData = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
 impl Database {
-    pub fn latest_email_uid(&self, account: &str) -> Result<u32, String> {
+    pub fn email_sync_cursor(&self, account: &str) -> Result<EmailSyncCursor, String> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
-        let value: i64 = connection
+        let value: Option<(i64, Option<i64>)> = connection
             .query_row(
-                "SELECT COALESCE((SELECT last_uid FROM email_sync_state WHERE account=?1 AND mailbox='INBOX'), 0)",
+                "SELECT last_uid,uid_validity FROM email_sync_state WHERE account=?1 AND mailbox='INBOX'",
                 [account],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let (last_uid, uid_validity) = value.unwrap_or((0, None));
+        Ok(EmailSyncCursor {
+            last_uid: last_uid.max(0) as u32,
+            uid_validity: uid_validity.map(|value| value.max(0) as u32),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn latest_email_uid(&self, account: &str) -> Result<u32, String> {
+        self.email_sync_cursor(account)
+            .map(|cursor| cursor.last_uid)
+    }
+
+    pub fn retryable_email_uids(&self, account: &str) -> Result<Vec<u32>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT uid FROM email_sync_failures
+                 WHERE account=?1 AND mailbox='INBOX' AND permanently_skipped=0
+                 ORDER BY last_attempt_at LIMIT 20",
             )
             .map_err(db_error)?;
-        Ok(value.max(0) as u32)
+        let rows = statement
+            .query_map([account], |row| row.get::<_, i64>(0))
+            .map_err(db_error)?;
+        rows.map(|row| row.map(|uid| uid.max(0) as u32).map_err(db_error))
+            .collect()
     }
 
     #[cfg(test)]
@@ -97,7 +154,7 @@ impl Database {
             .iter()
             .map(|item| (item.account.clone(), item.uid))
             .max_by_key(|(_, uid)| *uid);
-        self.ingest_emails_with_cursor(messages, cursor, fetched)
+        self.ingest_emails_with_cursor(messages, cursor, None, None, Vec::new(), fetched)
     }
 
     pub fn ingest_emails_through(
@@ -105,16 +162,28 @@ impl Database {
         messages: Vec<RawEmail>,
         account: &str,
         highest_uid: Option<u32>,
+        uid_validity: Option<u32>,
+        failures: Vec<EmailSyncFailure>,
         scanned: usize,
     ) -> Result<SyncResult, String> {
         let cursor = highest_uid.map(|uid| (account.to_string(), uid));
-        self.ingest_emails_with_cursor(messages, cursor, scanned)
+        self.ingest_emails_with_cursor(
+            messages,
+            cursor,
+            Some(account),
+            uid_validity,
+            failures,
+            scanned,
+        )
     }
 
     fn ingest_emails_with_cursor(
         &self,
         messages: Vec<RawEmail>,
         cursor: Option<(String, u32)>,
+        failure_account: Option<&str>,
+        uid_validity: Option<u32>,
+        failures: Vec<EmailSyncFailure>,
         fetched: usize,
     ) -> Result<SyncResult, String> {
         let mut connection = self
@@ -127,18 +196,43 @@ impl Database {
             recognized: 0,
             matched: 0,
         };
+        if let (Some(account), Some(uid_validity)) = (failure_account, uid_validity) {
+            transaction
+                .execute(
+                    "DELETE FROM email_sync_failures
+                     WHERE account=?1
+                       AND EXISTS(
+                         SELECT 1 FROM email_sync_state
+                         WHERE account=?1 AND mailbox='INBOX'
+                           AND uid_validity IS NOT NULL AND uid_validity<>?2
+                       )",
+                    params![account, uid_validity],
+                )
+                .map_err(db_error)?;
+        }
 
         for message in messages {
-            let combined = format!("{}\n{}", message.subject, message.body_text);
+            transaction
+                .execute(
+                    "DELETE FROM email_sync_failures
+                     WHERE account=?1 AND mailbox='INBOX' AND uid=?2",
+                    params![message.account, message.uid],
+                )
+                .map_err(db_error)?;
+            let combined = format!(
+                "{}\n{}",
+                message.subject,
+                primary_email_content(&message.body_text)
+            );
             let Some(classification) = classify(&message.subject, &message.body_text) else {
                 continue;
             };
             result.recognized += 1;
             let candidate = best_match(&transaction, &combined, &message.received_at)?;
-            if candidate.as_ref().is_some_and(|item| item.score >= 45) {
+            if candidate.as_ref().is_some_and(|item| item.safe_to_attach) {
                 result.matched += 1;
             }
-            let matched = candidate.as_ref().filter(|item| item.score >= 45);
+            let matched = candidate.as_ref().filter(|item| item.safe_to_attach);
             let confidence = candidate
                 .as_ref()
                 .map(|item| item.score.clamp(0, 100))
@@ -163,11 +257,36 @@ impl Database {
                     serde_json::to_string(&message.links).map_err(|error| error.to_string())?],
             ).map_err(db_error)?;
         }
+        for failure in failures {
+            let account = failure_account.unwrap_or_default();
+            transaction
+                .execute(
+                    "INSERT INTO email_sync_failures(account,mailbox,uid,reason,permanently_skipped)
+                     VALUES (?1,'INBOX',?2,?3,?4)
+                     ON CONFLICT(account,mailbox,uid) DO UPDATE SET
+                       reason=excluded.reason,retry_count=retry_count+1,
+                       permanently_skipped=excluded.permanently_skipped,
+                       last_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                    params![
+                        account,
+                        failure.uid,
+                        failure.reason,
+                        failure.permanently_skipped
+                    ],
+                )
+                .map_err(db_error)?;
+        }
         if let Some((account, uid)) = cursor {
             transaction.execute(
-                "INSERT INTO email_sync_state(account,mailbox,last_uid) VALUES (?1,'INBOX',?2)
-                 ON CONFLICT(account,mailbox) DO UPDATE SET last_uid=MAX(last_uid,excluded.last_uid),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
-                params![account, uid],
+                "INSERT INTO email_sync_state(account,mailbox,last_uid,uid_validity) VALUES (?1,'INBOX',?2,?3)
+                 ON CONFLICT(account,mailbox) DO UPDATE SET
+                   last_uid=CASE
+                     WHEN email_sync_state.uid_validity IS NOT excluded.uid_validity THEN excluded.last_uid
+                     ELSE MAX(email_sync_state.last_uid,excluded.last_uid)
+                   END,
+                   uid_validity=excluded.uid_validity,
+                   updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                params![account, uid, uid_validity],
             ).map_err(db_error)?;
         }
         transaction.commit().map_err(db_error)?;
@@ -181,7 +300,8 @@ impl Database {
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let mut statement = connection.prepare(
             "SELECT e.id,e.sender,e.subject,e.received_at,e.snippet,e.body_text,e.links_json,e.category,e.suggested_stage,e.status,e.matched_application_id,
-                    c.name,p.title,a.current_stage,e.confidence,e.reasons_json
+                    c.name,p.title,a.current_stage,e.confidence,e.reasons_json,
+                    EXISTS(SELECT 1 FROM tasks t WHERE t.source_type='email' AND t.source_id=e.id AND t.deleted_at IS NULL)
              FROM email_messages e
              LEFT JOIN applications a ON a.id=e.matched_application_id
              LEFT JOIN positions p ON p.id=a.position_id
@@ -215,6 +335,7 @@ impl Database {
                     current_stage: row.get(13)?,
                     confidence: row.get(14)?,
                     reasons: serde_json::from_str(&reasons_json).unwrap_or_default(),
+                    calendar_task_created: row.get(16)?,
                 })
             })
             .map_err(db_error)?;
@@ -226,11 +347,24 @@ impl Database {
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
-        connection.query_row(
-            "SELECT SUM(received_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')),
-                    SUM(status='pending'), SUM(status='confirmed'), SUM(status='unmatched') FROM email_messages",
-            [], |row| Ok(EmailStats { this_week: row.get::<_, Option<i64>>(0)?.unwrap_or(0), pending: row.get::<_, Option<i64>>(1)?.unwrap_or(0), confirmed: row.get::<_, Option<i64>>(2)?.unwrap_or(0), unmatched: row.get::<_, Option<i64>>(3)?.unwrap_or(0) })
-        ).map_err(db_error)
+        connection
+            .query_row(
+                "SELECT SUM(received_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now','-7 days')),
+                    SUM(status='pending'), SUM(status='confirmed'), SUM(status='unmatched'),
+                    (SELECT MAX(updated_at) FROM email_sync_state)
+             FROM email_messages",
+                [],
+                |row| {
+                    Ok(EmailStats {
+                        this_week: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                        pending: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        confirmed: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        unmatched: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        last_synced_at: row.get(4)?,
+                    })
+                },
+            )
+            .map_err(db_error)
     }
 
     pub fn ignore_email(&self, id: &str) -> Result<(), String> {
@@ -297,9 +431,9 @@ impl Database {
         // 已进入本地招聘邮件索引的记录，即使新规则无法判断具体阶段，也保留为
         // “待人工判断”，继续匹配投递，但绝不建议修改投递阶段。
         let classification = classify_existing(&subject, &body);
-        let text = format!("{subject}\n{body}");
+        let text = format!("{subject}\n{}", primary_email_content(&body));
         let candidate = best_match(&transaction, &text, &received)?;
-        let matched = candidate.as_ref().filter(|item| item.score >= 45);
+        let matched = candidate.as_ref().filter(|item| item.safe_to_attach);
         let reasons = candidate
             .as_ref()
             .map(|item| item.reasons.clone())
@@ -325,6 +459,75 @@ impl Database {
         transaction.commit().map_err(db_error)
     }
 
+    pub fn review_email(
+        &self,
+        email_id: &str,
+        application_id: &str,
+        category: &str,
+        suggested_stage: Option<&str>,
+    ) -> Result<(), String> {
+        const CATEGORIES: &[&str] = &[
+            "投递反馈 · 投递成功",
+            "测评邀请",
+            "笔试邀请",
+            "面试邀请",
+            "结果通知 · 进入下一轮",
+            "结果通知 · 流程进展",
+            "结果通知 · Offer",
+            "结果通知 · 未通过",
+            "HR 沟通",
+            "招聘邮件",
+            "待人工判断",
+        ];
+        const STAGES: &[&str] = &[
+            "已投递",
+            "等待结果",
+            "在线测评",
+            "笔试",
+            "面试中",
+            "HR 面试",
+            "已获Offer",
+            "已拒绝",
+            "进入人才库",
+            "主动放弃",
+        ];
+        let category = category.trim();
+        if !CATEGORIES.contains(&category) {
+            return Err("邮件分类无效".into());
+        }
+        let suggested_stage = suggested_stage
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if suggested_stage.is_some_and(|stage| !STAGES.contains(&stage)) {
+            return Err("建议阶段无效".into());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        attach_email_to_application_in_transaction(&transaction, email_id, application_id)?;
+        let mut review_reasons = vec!["用户手动选择了这条投递", "用户手动指定邮件分类"];
+        if suggested_stage.is_some() {
+            review_reasons.push("用户手动指定邮件阶段");
+        }
+        transaction
+            .execute(
+                "UPDATE email_messages
+                 SET category=?2,suggested_stage=?3,reasons_json=?4,status='pending',
+                     updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id=?1",
+                params![
+                    email_id,
+                    category,
+                    suggested_stage,
+                    serde_json::to_string(&review_reasons).map_err(|error| error.to_string())?
+                ],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)
+    }
+
     pub fn confirm_email_match(&self, id: &str) -> Result<(), String> {
         let mut connection = self
             .connection
@@ -333,6 +536,87 @@ impl Database {
         let transaction = connection.transaction().map_err(db_error)?;
         confirm_email_match_in_transaction(&transaction, id)?;
         transaction.commit().map_err(db_error)
+    }
+
+    pub fn create_email_calendar_task(
+        &self,
+        email_id: &str,
+        title: String,
+        due_at: String,
+        remind_at: Option<String>,
+    ) -> Result<ApplicationTask, String> {
+        let title = required(title, "任务标题")?;
+        let due_at = clean_timestamp(Some(due_at), "日历时间")?
+            .ok_or_else(|| "日历时间不能为空".to_string())?;
+        let remind_at = clean_timestamp(remind_at, "提醒时间")?;
+        validate_task_times(Some(&due_at), remind_at.as_deref())?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let (status, application_id, subject): (String, Option<String>, String) = transaction
+            .query_row(
+                "SELECT status,matched_application_id,subject FROM email_messages WHERE id=?1",
+                [email_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "邮件不存在".to_string())?;
+        if status != "confirmed" {
+            return Err("请先确认邮件关联，再创建日历任务".into());
+        }
+        let application_id = application_id.ok_or_else(|| "邮件尚未关联到投递".to_string())?;
+        let existing: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM tasks
+                   WHERE source_type='email' AND source_id=?1 AND deleted_at IS NULL
+                 )",
+                [email_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if existing {
+            return Err("这封邮件已经创建过日历任务".into());
+        }
+        let task_id = Uuid::new_v4().to_string();
+        transaction
+            .execute(
+                "INSERT INTO tasks(
+                   id,application_id,title,description,priority,due_at,remind_at,
+                   application_stage,source_type,source_id
+                 ) VALUES (?1,?2,?3,?4,2,?5,?6,NULL,'email',?7)",
+                params![
+                    task_id,
+                    application_id,
+                    title,
+                    format!("来自招聘邮件：{subject}"),
+                    due_at,
+                    remind_at,
+                    email_id
+                ],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "INSERT INTO application_events(
+                   id,application_id,event_type,title,content,source_type,source_id
+                 ) VALUES (?1,?2,'task_created','从邮件创建日历任务',?3,'email',?4)",
+                params![Uuid::new_v4().to_string(), application_id, title, task_id],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        query_tasks(&connection, &application_id)?
+            .into_iter()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| "创建日历任务后无法读取记录".to_string())
     }
 
     pub fn create_application_from_email(
@@ -345,6 +629,27 @@ impl Database {
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
+        let received_at: String = transaction
+            .query_row(
+                "SELECT received_at FROM email_messages WHERE id=?1",
+                [email_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "邮件不存在".to_string())?;
+        if let Some(applied_at) = input.applied_at.as_deref() {
+            let later: bool = transaction
+                .query_row(
+                    "SELECT date(?1) > date(?2)",
+                    params![applied_at, received_at],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if later {
+                return Err("投递日期不能晚于这封招聘邮件的接收日期".into());
+            }
+        }
         let application_id = create_application_record(&transaction, input)?;
         attach_email_to_application_in_transaction(&transaction, email_id, &application_id)?;
         confirm_email_match_in_transaction(&transaction, email_id)?;
@@ -380,18 +685,18 @@ fn attach_email_to_application_in_transaction(
         )
         .map_err(db_error)?;
     if !application_exists {
-        return Err("新建的投递不存在".into());
+        return Err("选择的投递不存在或已经删除".into());
     }
     transaction
         .execute(
             "UPDATE email_messages
-             SET matched_application_id=?2,confidence=100,reasons_json=?3,status='pending',
+             SET matched_application_id=?2,confidence=0,reasons_json=?3,status='pending',
                  updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id=?1",
             params![
                 email_id,
                 application_id,
-                serde_json::to_string(&vec!["用户从该邮件创建并确认关联"])
+                serde_json::to_string(&vec!["用户手动选择了这条投递"])
                     .map_err(|error| error.to_string())?
             ],
         )
@@ -403,11 +708,11 @@ fn confirm_email_match_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     id: &str,
 ) -> Result<(), String> {
-    let data: Option<(String, String, String, String, String, Option<String>)> = transaction.query_row(
-            "SELECT e.status,e.matched_application_id,e.category,e.subject,e.received_at,e.suggested_stage FROM email_messages e WHERE e.id=?1",
-            [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+    let data: Option<EmailConfirmationData> = transaction.query_row(
+            "SELECT e.status,e.matched_application_id,e.category,e.subject,e.received_at,e.suggested_stage,e.reasons_json FROM email_messages e WHERE e.id=?1",
+            [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
         ).optional().map_err(db_error)?;
-    let (status, application_id, category, subject, received_at, suggested_stage) =
+    let (status, application_id, category, subject, received_at, suggested_stage, reasons_json) =
         data.ok_or_else(|| "邮件不存在".to_string())?;
     if status == "confirmed" {
         return Ok(());
@@ -436,7 +741,19 @@ fn confirm_email_match_in_transaction(
             |row| row.get(0),
         )
         .map_err(db_error)?;
-    let next_stage = suggested_stage.filter(|stage| should_advance(&stage_at_email_time, stage));
+    // 只有用户在审核表单中明确指定阶段时才允许覆盖阶段保护。
+    // 单纯手动关联投递不应让自动建议回退已有流程。
+    let manual_stage_override = serde_json::from_str::<Vec<String>>(&reasons_json)
+        .unwrap_or_default()
+        .iter()
+        .any(|reason| reason == "用户手动指定邮件阶段");
+    let next_stage = suggested_stage.filter(|stage| {
+        if manual_stage_override {
+            stage != &stage_at_email_time
+        } else {
+            should_advance(&stage_at_email_time, stage)
+        }
+    });
     transaction.execute(
             "INSERT INTO application_events(id,application_id,event_type,title,content,source_type,source_id,stage_before,stage_after,happened_at,reversible)
              VALUES (?1,?2,'email_status',?3,?4,'email',?5,?6,?7,?8,?9)",
@@ -491,44 +808,73 @@ fn best_match(
             ))
         })
         .map_err(db_error)?;
-    let mut best: Option<MatchCandidate> = None;
+    let mut ranked = Vec::new();
     for row in candidates {
         let (id, company, role, job_code, applied_at) = row.map_err(db_error)?;
         let mut score = 0;
         let mut reasons = Vec::new();
+        let mut company_hit = false;
+        let mut role_hit = false;
+        let mut code_hit = false;
         if contains_meaningful(&normalized, &normalize(&company)) {
             score += 50;
+            company_hit = true;
             reasons.push(format!("邮件中出现公司名称“{company}”"));
         }
         if contains_meaningful(&normalized, &normalize(&role)) {
             score += 30;
+            role_hit = true;
             reasons.push(format!("邮件中出现岗位名称“{role}”"));
         } else {
             let overlap = keyword_overlap(&normalized, &normalize(&role));
             if overlap >= 2 {
                 score += 18;
+                role_hit = true;
                 reasons.push("岗位关键词与已投岗位相符".into());
             }
         }
         if !job_code.trim().is_empty() && normalized.contains(&normalize(&job_code)) {
             score += 25;
+            code_hit = true;
             reasons.push(format!("岗位编号 {job_code} 一致"));
         }
         if received_at >= applied_at.as_str() {
             score += 8;
             reasons.push("邮件时间晚于投递时间".into());
         }
-        let item = MatchCandidate { id, score, reasons };
-        if best.as_ref().is_none_or(|old| item.score > old.score) {
-            best = Some(item);
-        }
+        ranked.push((id, score, reasons, company_hit, role_hit, code_hit));
     }
-    Ok(best)
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let Some((id, score, mut reasons, company_hit, role_hit, code_hit)) = ranked.first().cloned()
+    else {
+        return Ok(None);
+    };
+    let margin = ranked
+        .get(1)
+        .map(|runner_up| score - runner_up.1)
+        .unwrap_or(score);
+    let evidence_is_specific = role_hit || code_hit;
+    let safe_to_attach = score >= 70 && margin >= 20 && evidence_is_specific;
+    if !evidence_is_specific && company_hit {
+        reasons.push("仅命中公司，无法区分同公司下的不同岗位".into());
+    }
+    if score < 70 {
+        reasons.push("匹配分不足 70，需要人工选择投递".into());
+    } else if margin < 20 {
+        reasons.push(format!("前两名仅相差 {margin} 分，存在岗位歧义"));
+    }
+    Ok(Some(MatchCandidate {
+        id,
+        score,
+        reasons,
+        safe_to_attach,
+    }))
 }
 
 fn classify(subject: &str, body: &str) -> Option<Classification> {
     let subject = subject.to_lowercase();
-    let value = format!("{subject}\n{}", body.to_lowercase());
+    let body = primary_email_content(body).to_lowercase();
+    let value = format!("{subject}\n{body}");
     let has = |words: &[&str]| words.iter().any(|word| value.contains(word));
     let subject_has = |words: &[&str]| words.iter().any(|word| subject.contains(word));
     if has(&[
@@ -540,7 +886,7 @@ fn classify(subject: &str, body: &str) -> Option<Classification> {
     ]) {
         return None;
     }
-    if has(&[
+    let rejection_words = &[
         "很遗憾",
         "遗憾地通知",
         "不得不遗憾",
@@ -553,7 +899,11 @@ fn classify(subject: &str, body: &str) -> Option<Classification> {
         "rejected",
         "not move forward",
         "other candidates",
-    ]) {
+    ];
+    if rejection_words
+        .iter()
+        .any(|word| contains_unconditional_phrase(&value, word))
+    {
         return Some(Classification {
             category: "结果通知 · 未通过",
             stage: Some("已拒绝"),
@@ -572,19 +922,37 @@ fn classify(subject: &str, body: &str) -> Option<Classification> {
         "正式 offer",
         "offer通知",
         "offer 通知",
-    ]) || has(&["we are pleased to offer you", "很高兴向您发出录用"]);
+    ]) || has(&[
+        "we are pleased to offer you",
+        "很高兴向您发出录用",
+        "向您发放offer",
+        "向你发放offer",
+        "发放 offer",
+        "发放offer",
+        "接受 offer",
+        "接受offer",
+    ]);
     if strong_offer || contains_ascii_word(&subject, "offer") {
         return Some(Classification {
             category: "结果通知 · Offer",
             stage: Some("已获Offer"),
         });
     }
-    // “面试结果及后续安排”必须归为结果，而不是因为包含“面试”误判为邀请。
     if has(&[
         "面试通过",
         "通过本轮",
         "通过了本轮",
         "进入下一轮",
+        "下一轮面试",
+        "next round interview",
+    ]) {
+        return Some(Classification {
+            category: "结果通知 · 进入下一轮",
+            stage: Some("面试中"),
+        });
+    }
+    // “面试结果及后续安排”必须归为结果，而不是因为包含“面试”误判为邀请。
+    if has(&[
         "结果通知",
         "面试结果",
         "测评结果",
@@ -703,6 +1071,79 @@ fn classify_existing(subject: &str, body: &str) -> Classification {
     })
 }
 
+fn primary_email_content(body: &str) -> String {
+    const QUOTE_MARKERS: &[&str] = &[
+        "-----original message-----",
+        "----- 原始邮件 -----",
+        "发件人:",
+        "from:",
+    ];
+    let body_lines = body.lines().collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    for (index, line) in body_lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        let quoted_block = trimmed.starts_with('>')
+            && (body_lines
+                .iter()
+                .skip(index + 1)
+                .find(|next| !next.trim().is_empty())
+                .is_some_and(|next| next.trim().starts_with('>'))
+                || ["> from:", "> 发件人:", "> on "]
+                    .iter()
+                    .any(|marker| lower.starts_with(marker)));
+        let reply_marker = QUOTE_MARKERS
+            .iter()
+            .take(2)
+            .any(|marker| lower.starts_with(marker))
+            || (!lines.is_empty()
+                && QUOTE_MARKERS
+                    .iter()
+                    .skip(2)
+                    .any(|marker| lower.starts_with(marker)));
+        if quoted_block
+            || reply_marker
+            || (lower.starts_with("on ") && lower.ends_with(" wrote:"))
+            || (trimmed.starts_with("在 ") && trimmed.ends_with("写道："))
+        {
+            break;
+        }
+        if matches!(
+            lower.as_str(),
+            "此致" | "best regards" | "kind regards" | "sent from my iphone"
+        ) {
+            break;
+        }
+        lines.push(*line);
+    }
+    lines.join("\n")
+}
+
+fn contains_unconditional_phrase(value: &str, phrase: &str) -> bool {
+    value.match_indices(phrase).any(|(index, _)| {
+        let prefix = value[..index]
+            .chars()
+            .rev()
+            .take(24)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let clause = prefix
+            .rsplit(['。', '！', '？', ';', '；', '\n'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        ![
+            "如果", "假如", "倘若", "若您", "若你", "若未", "如您", "如你", "如未", "if ",
+            "unless ",
+        ]
+        .iter()
+        .any(|marker| clause.contains(marker))
+    })
+}
+
 fn contains_ascii_word(value: &str, word: &str) -> bool {
     value.match_indices(word).any(|(index, matched)| {
         let before = value[..index].chars().next_back();
@@ -720,6 +1161,14 @@ fn should_advance(current: &str, suggested: &str) -> bool {
         current,
         "已获Offer" | "已拒绝" | "进入人才库" | "流程暂停" | "流程结束" | "主动放弃"
     ) {
+        return false;
+    }
+    // “等待结果”是面试轮次之间的可循环状态，不是高于面试的终态。
+    if current.contains("等待") && (suggested.contains('面') || suggested.contains("HR")) {
+        return true;
+    }
+    // “面试中”是泛化阶段，不能覆盖 HR 面、终面等更具体的面试轮次。
+    if suggested == "面试中" && (current.contains('面') || current.contains("HR")) {
         return false;
     }
     let rank = |stage: &str| {
@@ -867,22 +1316,7 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
                 .trim_start_matches("你本次")
                 .trim_start_matches("本次")
                 .trim();
-            if candidate.chars().count() >= 2
-                && candidate.chars().count() <= 40
-                && [
-                    "工程师",
-                    "开发",
-                    "研发",
-                    "算法",
-                    "产品",
-                    "运营",
-                    "设计",
-                    "测试",
-                    "实习",
-                ]
-                .iter()
-                .any(|word| candidate.contains(word))
-            {
+            if looks_like_role(candidate) {
                 return Some(candidate.to_string());
             }
         }
@@ -938,7 +1372,16 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
     ] {
         candidate = candidate.trim_end_matches(suffix).trim().to_string();
     }
-    if candidate.chars().count() >= 2
+    if looks_like_role(&candidate) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn looks_like_role(candidate: &str) -> bool {
+    let normalized = candidate.to_lowercase();
+    candidate.chars().count() >= 2
         && candidate.chars().count() <= 40
         && [
             "工程师",
@@ -950,14 +1393,19 @@ fn extract_role(subject: &str, body: &str) -> Option<String> {
             "设计",
             "测试",
             "实习",
+            "后端",
+            "前端",
+            "数据",
+            "java",
+            "python",
+            "全栈",
+            "架构",
+            "安全",
+            "运维",
+            "分析",
         ]
         .iter()
-        .any(|word| candidate.contains(word))
-    {
-        Some(candidate)
-    } else {
-        None
-    }
+        .any(|word| normalized.contains(word))
 }
 
 fn normalize(value: &str) -> String {
@@ -1029,10 +1477,31 @@ mod tests {
             classify("很遗憾，您未能通过", "").and_then(|item| item.stage),
             Some("已拒绝")
         );
+        assert_eq!(
+            classify(
+                "招聘结果通知",
+                "很遗憾，您未能通过本轮筛选。常见问题：如果未通过，能否再次申请？"
+            )
+            .and_then(|item| item.stage),
+            Some("已拒绝")
+        );
+        assert_ne!(
+            classify(
+                "招聘流程说明",
+                "如果您未能通过筛选，我们会保留您的申请资料。"
+            )
+            .and_then(|item| item.stage),
+            Some("已拒绝")
+        );
+        assert_eq!(
+            classify("招聘结果", "我们决定向您发放Offer，请于三日内接受Offer。")
+                .and_then(|item| item.stage),
+            Some("已获Offer")
+        );
         let result = classify("面试结果及后续安排", "恭喜通过本轮技术面试").unwrap();
         assert_eq!(
             (result.category, result.stage),
-            ("结果通知 · 流程进展", Some("等待结果"))
+            ("结果通知 · 进入下一轮", Some("面试中"))
         );
         let receipt = classify(
             "申请已提交",
@@ -1112,6 +1581,18 @@ mod tests {
             extract_role("前端开发工程师技术一面", "").as_deref(),
             Some("前端开发工程师")
         );
+        assert_eq!(
+            extract_role("Java后端一面", "").as_deref(),
+            Some("Java后端")
+        );
+        assert_eq!(
+            extract_role("数据分析实习生在线测评邀请", "").as_deref(),
+            Some("数据分析实习生")
+        );
+        assert_eq!(
+            extract_role("全栈架构师技术沟通", "").as_deref(),
+            Some("全栈架构师")
+        );
     }
 
     #[test]
@@ -1141,9 +1622,165 @@ mod tests {
         assert!(!should_advance("面试中", "在线测评"));
         assert!(!should_advance("已获Offer", "已拒绝"));
         assert!(should_advance("在线测评", "笔试"));
+        assert!(should_advance("等待结果", "面试中"));
         assert!(!should_advance("进入人才库", "面试中"));
         assert!(!should_advance("HR 面试", "在线测评"));
+        assert!(!should_advance("HR 面试", "面试中"));
+        assert!(!should_advance("终面", "面试中"));
+        assert!(should_advance("面试中", "HR 面试"));
         assert!(!should_advance("主动放弃", "面试中"));
+    }
+
+    #[test]
+    fn quoted_rejection_does_not_override_a_new_interview_invitation() {
+        let result = classify(
+            "二面邀请",
+            "恭喜进入下一轮，请参加二面。\n-----Original Message-----\n很遗憾，您此前申请的岗位未能通过。",
+        )
+        .unwrap();
+        assert_eq!(
+            (result.category, result.stage),
+            ("结果通知 · 进入下一轮", Some("面试中"))
+        );
+    }
+
+    #[test]
+    fn decorative_separator_and_single_angle_line_keep_current_content() {
+        let result = classify(
+            "招聘流程更新",
+            "________________________\n> 请在今晚之前完成在线测评\n测评链接：https://example.com",
+        )
+        .unwrap();
+        assert_eq!(
+            (result.category, result.stage),
+            ("测评邀请", Some("在线测评"))
+        );
+    }
+
+    #[test]
+    fn manual_link_keeps_stage_guard_but_explicit_stage_review_can_override() {
+        let db = Database::in_memory().unwrap();
+        let application = db
+            .create_application(CreateApplicationInput {
+                company_name: "阶段科技".into(),
+                company_short_name: None,
+                industry: None,
+                company_type: None,
+                website: None,
+                company_notes: None,
+                position_title: "后端工程师".into(),
+                department: None,
+                location: None,
+                recruitment_type: None,
+                job_code: None,
+                source_url: None,
+                channel: Some("官网".into()),
+                applied_at: Some("2026-07-01".into()),
+                priority: Some(2),
+                jd_raw: None,
+                resume_profile_id: None,
+            })
+            .unwrap();
+        db.update_application_stage(&application.id, "HR 面试")
+            .unwrap();
+        db.ingest_emails(vec![
+            RawEmail {
+                account: "me@example.com".into(),
+                mailbox: "INBOX".into(),
+                uid: 78,
+                message_id: Some("manual-link".into()),
+                sender: "陌生招聘平台 <jobs@unknown.example>".into(),
+                subject: "在线测评邀请".into(),
+                received_at: "2026-07-20T09:00:00Z".into(),
+                body_text: "请完成在线测评".into(),
+                links: Vec::new(),
+            },
+            RawEmail {
+                account: "me@example.com".into(),
+                mailbox: "INBOX".into(),
+                uid: 79,
+                message_id: Some("manual-review".into()),
+                sender: "另一招聘平台 <jobs@other.example>".into(),
+                subject: "招聘流程更新".into(),
+                received_at: "2026-07-21T09:00:00Z".into(),
+                body_text: "请查看招聘流程更新".into(),
+                links: Vec::new(),
+            },
+        ])
+        .unwrap();
+        let emails = db.list_email_messages().unwrap();
+        let linked = emails
+            .iter()
+            .find(|email| email.subject == "在线测评邀请")
+            .unwrap();
+        db.attach_email_to_application(&linked.id, &application.id)
+            .unwrap();
+        db.confirm_email_match(&linked.id).unwrap();
+        assert_eq!(
+            db.get_application_detail(&application.id)
+                .unwrap()
+                .current_stage,
+            "HR 面试"
+        );
+
+        let reviewed = emails
+            .iter()
+            .find(|email| email.subject == "招聘流程更新")
+            .unwrap();
+        db.review_email(&reviewed.id, &application.id, "测评邀请", Some("在线测评"))
+            .unwrap();
+        db.confirm_email_match(&reviewed.id).unwrap();
+        assert_eq!(
+            db.get_application_detail(&application.id)
+                .unwrap()
+                .current_stage,
+            "在线测评"
+        );
+    }
+
+    #[test]
+    fn company_only_match_is_left_for_manual_selection() {
+        let db = Database::in_memory().unwrap();
+        let create = |role: &str| CreateApplicationInput {
+            company_name: "示例科技".into(),
+            company_short_name: None,
+            industry: None,
+            company_type: None,
+            website: None,
+            company_notes: None,
+            position_title: role.into(),
+            department: None,
+            location: None,
+            recruitment_type: None,
+            job_code: None,
+            source_url: None,
+            channel: None,
+            applied_at: Some("2026-07-01".into()),
+            priority: Some(2),
+            jd_raw: None,
+            resume_profile_id: None,
+        };
+        db.create_application(create("后端开发")).unwrap();
+        db.create_application(create("产品经理")).unwrap();
+        db.ingest_emails(vec![RawEmail {
+            account: "me@example.com".into(),
+            mailbox: "INBOX".into(),
+            uid: 77,
+            message_id: None,
+            sender: "示例科技招聘 <jobs@example.com>".into(),
+            subject: "示例科技校园招聘进展".into(),
+            received_at: "2026-07-10T09:00:00Z".into(),
+            body_text: "请登录候选人中心查看最新消息".into(),
+            links: Vec::new(),
+        }])
+        .unwrap();
+        let email = db.list_email_messages().unwrap().remove(0);
+        assert_eq!(email.status, "unmatched");
+        assert!(email.matched_application_id.is_none());
+        assert!(email
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("仅命中公司")));
     }
 
     #[test]
@@ -1218,7 +1855,14 @@ mod tests {
     fn skipped_email_still_advances_the_sync_cursor() {
         let db = Database::in_memory().unwrap();
         let result = db
-            .ingest_emails_through(Vec::new(), "me@example.com", Some(23), 0)
+            .ingest_emails_through(
+                Vec::new(),
+                "me@example.com",
+                Some(23),
+                Some(42),
+                Vec::new(),
+                0,
+            )
             .unwrap();
         assert_eq!(result.fetched, 0);
         assert_eq!(result.recognized, 0);
@@ -1276,6 +1920,35 @@ mod tests {
                 .unwrap()
                 .current_stage,
             "面试中"
+        );
+        let task = db
+            .create_email_calendar_task(
+                &email.id,
+                "技术面试".into(),
+                "2026-07-20T14:00:00Z".into(),
+                Some("2026-07-20T13:30:00Z".into()),
+            )
+            .unwrap();
+        assert_eq!(task.source_type, "email");
+        assert!(db
+            .create_email_calendar_task(
+                &email.id,
+                "重复面试".into(),
+                "2026-07-20T14:00:00Z".into(),
+                None,
+            )
+            .unwrap_err()
+            .contains("已经创建过"));
+        let detail = db.get_application_detail(&application.id).unwrap();
+        let email_event = detail
+            .events
+            .iter()
+            .find(|event| event.source_type == "email" && event.reversible)
+            .unwrap();
+        db.revert_application_event(&email_event.id).unwrap();
+        assert_eq!(
+            db.list_email_messages().unwrap().remove(0).status,
+            "pending"
         );
     }
 

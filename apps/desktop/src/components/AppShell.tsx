@@ -69,7 +69,7 @@ export default function AppShell() {
         listEmailMessages(),
         getEmailStats(),
       ]);
-      if (request === notificationRequest.current) { setNotificationTasks(result.tasks); setEmailMessages(messages); setEmailPending(stats.pending); }
+      if (request === notificationRequest.current) { setNotificationTasks(result.tasks); setEmailMessages(messages); setEmailPending(stats.pending + stats.unmatched); }
     } catch { /* 保留上一次成功读取的数据 */ }
     finally { if (request === notificationRequest.current) setNotificationsLoading(false); }
   };
@@ -115,22 +115,31 @@ export default function AppShell() {
     let timer: number | undefined;
     let schedulerRevision = 0;
     let disposed = false;
-    const refreshIndex = () => Promise.all([listEmailMessages(), getEmailStats()]).then(([items, stats]) => { setEmailMessages(items); setEmailPending(stats.pending); }).catch(() => undefined);
+    const refreshIndex = () => Promise.all([listEmailMessages(), getEmailStats()]).then(([items, stats]) => { setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched); }).catch(() => undefined);
     void refreshIndex();
     const configureScheduler = () => {
       const revision = ++schedulerRevision;
       if (timer !== undefined) { window.clearInterval(timer); timer = undefined; }
       void getProviderSettings().then((settings) => {
         if (disposed || revision !== schedulerRevision || !settings.email.enabled) return;
-        timer = window.setInterval(() => {
-          void syncEmails().then(refreshIndex).catch((reason) => {
+        const runAutomaticSync = () => {
+          void syncEmails().then((result) => {
+            void refreshIndex();
+            if (result.failedCount > 0) {
+              const failed = result.accounts.filter((account) => account.status === "failed");
+              setToastKind("error");
+              setToast(`邮件自动检查部分失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`);
+            }
+          }).catch((reason) => {
             void refreshIndex();
             setToastKind("error");
             setToast(`邮件自动检查异常：${String(reason)}`);
             if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
             localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 6000);
           });
-        }, Math.max(1, settings.email.pollingMinutes) * 60_000);
+        };
+        runAutomaticSync();
+        timer = window.setInterval(runAutomaticSync, Math.max(1, settings.email.pollingMinutes) * 60_000);
       }).catch(() => undefined);
     };
     configureScheduler();
@@ -177,14 +186,18 @@ export default function AppShell() {
     try {
       const result = await syncEmails();
       const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]);
-      setEmailMessages(items); setEmailPending(stats.pending);
+      setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched);
       window.dispatchEvent(new Event("email-index-changed"));
-      setToastKind("success"); setToast(`已识别 ${result.recognized} 封招聘邮件，其中 ${result.matched} 封匹配到投递`);
+      const failed = result.accounts.filter((account) => account.status === "failed");
+      setToastKind(failed.length ? "error" : "success");
+      setToast(failed.length
+        ? `已检查 ${result.successCount} 个邮箱，${result.failedCount} 个失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`
+        : `已识别 ${result.recognized} 封招聘邮件，其中 ${result.matched} 封匹配到投递`);
       if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
       localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 3200);
     } catch (reason) {
       const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]).catch(() => [undefined, undefined] as const);
-      if (items && stats) { setEmailMessages(items); setEmailPending(stats.pending); }
+      if (items && stats) { setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched); }
       setToastKind("error"); setToast(`邮件检查失败：${String(reason)}`);
       if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
       localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 4200);

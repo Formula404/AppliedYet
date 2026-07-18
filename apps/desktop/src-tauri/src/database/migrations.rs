@@ -75,4 +75,9 @@ pub(super) const MIGRATIONS: &[(i64, &str, &str)] = &[
         "016_interview_workflow",
         include_str!("../../migrations/016_interview_workflow.sql"),
     ),
+    (
+        17,
+        "017_email_reliability",
+        include_str!("../../migrations/017_email_reliability.sql"),
+    ),
 ];

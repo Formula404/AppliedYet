@@ -55,7 +55,7 @@ export const demoAnalytics = (): AnalyticsData => ({
 
 const initialEmails: RecruitmentEmail[] = [
   { id: "demo-mail-1", sender: "campus@antgroup.com", subject: "蚂蚁集团技术一面安排", receivedAt: iso(0, 8, 42), snippet: "感谢投递后端开发工程师岗位，诚邀你参加技术一面。", bodyText: "你好！你的技术一面安排在今天 14:00，请提前 10 分钟进入会议。面试将重点沟通项目经历与系统设计。", links: [{ label: "进入面试会议", url: "https://meeting.example.com/ant-demo" }], category: "面试邀请", suggestedStage: "面试中", status: "confirmed", matchedApplicationId: "ant", company: "蚂蚁集团", role: "后端开发工程师", currentStage: "面试中", confidence: 98, reasons: ["公司域名一致", "岗位名称一致", "邮件含面试时间"] },
-  { id: "demo-mail-2", sender: "recruiting@bytedance.com", subject: "面试通过及后续安排", receivedAt: iso(-1, 18, 16), snippet: "恭喜通过本轮技术面试，后续面试时间将另行通知。", bodyText: "恭喜你通过研发工程师岗位第一轮技术面试。我们将在两个工作日内与你确认下一轮时间。", links: [], category: "结果通知 · 流程进展", suggestedStage: "等待结果", status: "confirmed", matchedApplicationId: "bytedance", company: "字节跳动", role: "研发工程师", currentStage: "等待结果", confidence: 96, reasons: ["公司名称命中", "岗位一致", "通过语义明确"] },
+  { id: "demo-mail-2", sender: "recruiting@bytedance.com", subject: "面试通过及后续安排", receivedAt: iso(-1, 18, 16), snippet: "恭喜通过本轮技术面试，后续面试时间将另行通知。", bodyText: "恭喜你通过研发工程师岗位第一轮技术面试。我们将在两个工作日内与你确认下一轮时间。", links: [], category: "结果通知 · 进入下一轮", suggestedStage: "面试中", status: "confirmed", matchedApplicationId: "bytedance", company: "字节跳动", role: "研发工程师", currentStage: "面试中", confidence: 96, reasons: ["公司名称命中", "岗位一致", "通过语义明确"] },
   { id: "demo-mail-3", sender: "talent@meituan.com", subject: "关于 Java 开发岗位的进一步沟通", receivedAt: iso(-2, 11, 8), snippet: "希望与你电话沟通当前求职进展和岗位意向。", bodyText: "你好，我们希望进一步了解你的岗位意向、期望城市与薪资范围，请回复方便沟通的时间。", links: [], category: "HR 沟通", suggestedStage: "等待结果", status: "pending", matchedApplicationId: "meituan", company: "美团", role: "Java 开发工程师", currentStage: "HR 沟通", confidence: 82, reasons: ["公司与岗位匹配", "阶段语义可能为 HR 面或 Offer 沟通，需人工确认"] },
   { id: "demo-mail-4", sender: "no-reply@hackerrank.com", subject: "Online Assessment Reminder - Backend", receivedAt: iso(-2, 9, 35), snippet: "Your assessment invitation will expire tonight.", bodyText: "This is a reminder that your backend online assessment expires at 23:59 today.", links: [{ label: "Start assessment", url: "https://assessment.example.com/demo" }], category: "测评邀请", suggestedStage: "在线测评", status: "confirmed", matchedApplicationId: "shopee", company: "Shopee", role: "平台开发工程师", currentStage: "在线测评", confidence: 91, reasons: ["岗位关键词匹配", "测评链接与截止时间明确"] },
   { id: "demo-mail-5", sender: "星云科技招聘 <hr@startup-example.com>", subject: "后端工程师面试邀请", receivedAt: iso(-3, 16, 20), snippet: "我们在招聘网站看到了你的资料，希望约一次线上沟通。", bodyText: "你好，我们是一家企业服务创业公司，希望邀请你参加后端工程师线上面试。", links: [], category: "面试邀请", suggestedStage: "面试中", status: "unmatched", company: "星云科技", role: "后端工程师", confidence: 43, reasons: ["没有找到对应投递", "公司名称未出现在现有记录"] },
@@ -63,15 +63,35 @@ const initialEmails: RecruitmentEmail[] = [
 
 let demoEmails = initialEmails.map((item) => ({ ...item }));
 export const listDemoEmails = async () => demoEmails.map((item) => ({ ...item, links: [...item.links], reasons: [...item.reasons] }));
-export const demoEmailStats = async (): Promise<EmailStats> => ({ thisWeek: demoEmails.length, pending: demoEmails.filter((item) => item.status === "pending").length, confirmed: demoEmails.filter((item) => item.status === "confirmed").length, unmatched: demoEmails.filter((item) => item.status === "unmatched").length });
+export const demoEmailStats = async (): Promise<EmailStats> => ({ thisWeek: demoEmails.length, pending: demoEmails.filter((item) => item.status === "pending").length, confirmed: demoEmails.filter((item) => item.status === "confirmed").length, unmatched: demoEmails.filter((item) => item.status === "unmatched").length, lastSyncedAt: new Date().toISOString() });
 export const setDemoEmailStatus = async (id: string, status: RecruitmentEmail["status"]) => { demoEmails = demoEmails.map((item) => item.id === id ? { ...item, status } : item); };
 export const setDemoEmailApplication = async (id: string, applicationId: string) => {
   demoEmails = demoEmails.map((item) => item.id === id ? {
     ...item,
     matchedApplicationId: applicationId,
     status: "pending",
-    confidence: 100,
-    reasons: ["用户从该邮件创建并确认关联"],
+    confidence: 0,
+    reasons: ["用户手动选择了这条投递"],
+  } : item);
+};
+export const reviewDemoEmail = async (
+  id: string,
+  applicationId: string,
+  category: string,
+  suggestedStage?: string,
+) => {
+  demoEmails = demoEmails.map((item) => item.id === id ? {
+    ...item,
+    matchedApplicationId: applicationId,
+    category,
+    suggestedStage,
+    status: "pending",
+    confidence: 0,
+    reasons: [
+      "用户手动选择了这条投递",
+      "用户手动指定邮件分类",
+      ...(suggestedStage ? ["用户手动指定邮件阶段"] : []),
+    ],
   } : item);
 };
 
