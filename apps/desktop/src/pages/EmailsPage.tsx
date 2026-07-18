@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, ChevronUp, ExternalLink, Inbox, Link2, Mail, RefreshCw, ShieldCheck } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, ChevronUp, ExternalLink, Inbox, Link2, Mail, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { Badge, Card, PageHeader } from "../components/ui";
+import { NewApplicationDialog } from "../components/NewApplicationDialog";
 import { hasLocalDatabase } from "../services/applications";
-import { confirmEmailMatch, getEmailStats, ignoreEmail, listEmailMessages, rematchEmail, syncEmails, type EmailStats, type RecruitmentEmail } from "../services/emails";
+import { attachEmailToApplication, confirmEmailMatch, createApplicationFromEmail, getEmailStats, ignoreEmail, listEmailMessages, rematchEmail, syncEmails, type EmailStats, type RecruitmentEmail } from "../services/emails";
 import { showToast } from "../services/toast";
 import { openExternalUrl } from "../services/external";
+import { useInterviewFlow } from "../hooks/useInterviewFlow";
 
 type Filter = "all" | "pending" | "confirmed" | "unmatched";
 const emptyStats: EmailStats = { thisWeek: 0, pending: 0, confirmed: 0, unmatched: 0 };
@@ -19,6 +21,8 @@ export default function EmailsPage() {
   const [syncing, setSyncing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const { createApplication } = useInterviewFlow();
 
   const load = useCallback(async () => {
     try {
@@ -68,13 +72,54 @@ export default function EmailsPage() {
       {filtered.map((mail) => <button className={`email-item ${selectedId === mail.id ? "selected" : ""}`} key={mail.id} onClick={() => setSelectedId(mail.id)}><span className="company-logo">{mail.company?.[0] ?? "邮"}</span><span><span><strong>{mail.company ?? senderName(mail.sender)}</strong><time>{formatTime(mail.receivedAt)}</time></span><b>{mail.subject}</b><small>{mail.snippet || "邮件没有可显示的纯文本正文"}</small><span><Badge tone={mail.status === "confirmed" ? "green" : mail.status === "pending" ? "orange" : "gray"}>{statusLabel[mail.status]}</Badge><em>{mail.matchedApplicationId ? `${mail.confidence}% 匹配` : "等待匹配"}</em></span></span></button>)}</Card>
       <Card className="email-detail">{selected ? <><div className="detail-head"><div><Badge tone={selected.status === "confirmed" ? "green" : "blue"}>{selected.category}</Badge><h2>{selected.subject}</h2><p>{selected.sender} · {formatTime(selected.receivedAt)}</p></div></div><div className={`mail-body ${expanded ? "is-expanded" : ""}`}><div className="mail-body-content">{linkifyText(expanded ? selected.bodyText : selected.snippet || "邮件没有可显示的纯文本正文。")}</div>{expanded && selected.links.length > 0 && <div className="mail-link-list"><strong>邮件中的链接</strong>{selected.links.map((link, index) => <a key={link.url} href={link.url} onClick={(event) => { event.preventDefault(); void openExternalUrl(link.url).catch((reason) => showToast(String(reason), "error")); }}><ExternalLink size={13}/><span>{link.label || `邮件链接 ${index + 1}`}</span><small>{link.url}</small></a>)}</div>}<button type="button" className="mail-expand-button" onClick={() => setExpanded((value) => !value)}>{expanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>} {expanded ? "收起邮件全文" : "展开邮件全文"}</button></div>
         <div className="match-analysis"><div className="analysis-title"><span><Link2 size={17}/>匹配分析</span><strong>{selected.matchedApplicationId ? `${selected.confidence}% ${selected.confidence >= 75 ? "高" : "中"}置信度` : "尚未匹配"}</strong></div>
-        {selected.matchedApplicationId ? <><div className="match-target"><span className="company-logo">{selected.company?.[0] ?? "投"}</span><span><strong>{selected.company} · {selected.role}</strong><small>当前阶段：{selected.currentStage ?? "未知"}</small></span><ChevronRight size={18}/></div><dl>{selected.reasons.map((reason, index) => <div key={reason}><dt>依据 {index + 1}</dt><dd>{reason}</dd></div>)}</dl></> : <div className="settings-notice">当前投递中没有足够接近的公司或岗位，请补充投递信息后重新匹配。</div>}</div>
-        {selected.suggestedStage && <div className="update-suggestion"><strong>建议更新</strong><p>新增“{selected.category}”邮件事件{selected.currentStage !== selected.suggestedStage ? `，并将阶段安全推进至“${selected.suggestedStage}”；阶段更新可从时间线撤销` : "；当前阶段无需变更"}。</p></div>}
-        <div className="detail-actions"><button className="button button--secondary" disabled={busy || selected.status === "confirmed"} onClick={() => act("ignore")}>忽略邮件</button><button className="button button--secondary" disabled={busy} onClick={() => act("rematch")}>重新识别与匹配</button><button className="button button--primary" disabled={busy || !selected.matchedApplicationId || selected.status === "confirmed"} onClick={() => act("confirm")}><Check size={16}/>{selected.status === "confirmed" ? "已更新流程" : "确认匹配并更新"}</button></div></> : <div className="email-empty"><Mail size={38}/><strong>选择一封邮件查看识别结果</strong></div>}</Card>
+        {selected.matchedApplicationId ? <><div className="match-target"><span className="company-logo">{selected.company?.[0] ?? "投"}</span><span><strong>{selected.company} · {selected.role}</strong><small>当前阶段：{selected.currentStage ?? "未知"}</small></span><ChevronRight size={18}/></div><dl>{selected.reasons.map((reason, index) => <div key={reason}><dt>依据 {index + 1}</dt><dd>{reason}</dd></div>)}</dl></> : <div className="settings-notice">当前投递中没有足够接近的记录。你可以将邮件直接加入投递流程，或先完善已有投递后重新匹配。</div>}</div>
+        {selected.suggestedStage && <div className="update-suggestion"><strong>建议更新</strong><p>按邮件接收时间新增“{selected.category}”事件，并以当时的历史阶段判断是否进入“{selected.suggestedStage}”；如果时间线上已有更晚节点，当前阶段会保留较新的状态。</p></div>}
+        <div className="detail-actions"><button className="button button--secondary" disabled={busy || selected.status === "confirmed"} onClick={() => act("ignore")}>忽略邮件</button><button className="button button--secondary" disabled={busy} onClick={() => act("rematch")}>重新识别与匹配</button>{!selected.matchedApplicationId && selected.status !== "confirmed" ? <button className="button button--primary" disabled={busy} onClick={() => setAdding(true)}><Plus size={16}/>加入投递流程</button> : <button className="button button--primary" disabled={busy || selected.status === "confirmed"} onClick={() => act("confirm")}><Check size={16}/>{selected.status === "confirmed" ? "已更新流程" : "确认匹配并更新"}</button>}</div></> : <div className="email-empty"><Mail size={38}/><strong>选择一封邮件查看识别结果</strong></div>}</Card>
     </div>
+    {adding && selected && <NewApplicationDialog
+      saving={busy}
+      onClose={() => setAdding(false)}
+      emailStage={selected.category}
+      requireAppliedAt
+      description={isApplicationReceipt(selected) ? "已识别为投递成功回执，请确认自动填入的信息" : `这是一封${selected.category}邮件，请补充原投递信息后加入流程`}
+      defaults={{
+        companyName: selected.company ?? "",
+        positionTitle: selected.role ?? "",
+        appliedAt: isApplicationReceipt(selected) ? inputDate(selected.receivedAt) : "",
+        channel: "邮件识别",
+      }}
+      onError={(reason) => showToast(`新增投递失败：${String(reason)}`, "error")}
+      onSubmit={async (input) => {
+        setBusy(true);
+        try {
+          const application = hasLocalDatabase
+            ? await createApplicationFromEmail(selected.id, input)
+            : await createApplication(input);
+          if (!hasLocalDatabase) {
+            await attachEmailToApplication(selected.id, application.id);
+            await confirmEmailMatch(selected.id);
+          }
+          setAdding(false);
+          await load();
+          window.dispatchEvent(new Event("email-index-changed"));
+          window.dispatchEvent(new Event("application-index-changed"));
+          showToast(isApplicationReceipt(selected) ? "已加入“已投递”流程" : `已创建投递并写入“${selected.category}”阶段`);
+          return application;
+        } finally {
+          setBusy(false);
+        }
+      }}
+    />}
   </div>;
 }
 
+function isApplicationReceipt(mail: RecruitmentEmail) { return mail.category.startsWith("投递反馈") && mail.suggestedStage === "已投递"; }
+function inputDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
 function senderName(sender: string) { return sender.split("<")[0]?.replace(/[\"']/g, "").trim() || "招聘邮件"; }
 function formatTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date); }
 function linkifyText(text: string) {

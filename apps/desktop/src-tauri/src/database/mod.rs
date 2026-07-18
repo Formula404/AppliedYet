@@ -812,71 +812,12 @@ impl Database {
         &self,
         input: CreateApplicationInput,
     ) -> Result<ApplicationListItem, String> {
-        let company_name = required(input.company_name, "公司名称")?;
-        let position_title = required(input.position_title, "岗位名称")?;
-        let website = clean_external_url(input.website, "公司官网")?;
-        let source_url = clean_external_url(input.source_url, "招聘链接")?;
-        let priority = input.priority.unwrap_or(2);
-        let applied_at = clean_date(input.applied_at, "投递日期")?;
-        if !(1..=3).contains(&priority) {
-            return Err("优先级必须在 1 到 3 之间".to_string());
-        }
         let mut connection = self
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
         let transaction = connection.transaction().map_err(db_error)?;
-
-        let company_id = transaction
-            .query_row(
-                "SELECT id FROM companies WHERE name = ?1 COLLATE NOCASE AND deleted_at IS NULL",
-                [&company_name],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(db_error)?
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO companies(id, name) VALUES (?1, ?2)",
-                params![company_id, company_name],
-            )
-            .map_err(db_error)?;
-        transaction.execute(
-            "UPDATE companies SET short_name=COALESCE(?2,short_name),industry=COALESCE(?3,industry),company_type=COALESCE(?4,company_type),website=COALESCE(?5,website),notes=COALESCE(?6,notes),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
-            params![company_id, clean(input.company_short_name), clean(input.industry), clean(input.company_type), website, clean(input.company_notes)],
-        ).map_err(db_error)?;
-
-        let position_id = Uuid::new_v4().to_string();
-        transaction.execute(
-            "INSERT INTO positions(id, company_id, title, department, location, recruitment_type, job_code, source_url, jd_raw) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![position_id, company_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), source_url, clean(input.jd_raw)],
-        ).map_err(db_error)?;
-
-        let resume_profile_id = match clean(input.resume_profile_id) {
-            Some(id) => transaction
-                .query_row(
-                    "SELECT id FROM resume_profiles WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL",
-                    [&id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(db_error)?
-                .ok_or_else(|| "选择的简历不存在或已归档".to_string())?
-                .into(),
-            None => None,
-        };
-        let application_id = Uuid::new_v4().to_string();
-        transaction.execute(
-            "INSERT INTO applications(id, position_id, applied_at, channel, priority, resume_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![application_id, position_id, applied_at.clone(), clean(input.channel), priority, resume_profile_id],
-        ).map_err(db_error)?;
-        transaction.execute(
-            "INSERT INTO application_events(id, application_id, event_type, title, source_type, stage_after, happened_at)
-             VALUES (?1, ?2, 'application_created', '创建投递', 'manual', '已投递',
-                     COALESCE(?3 || 'T00:00:00.000Z', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
-            params![Uuid::new_v4().to_string(), application_id, applied_at],
-        ).map_err(db_error)?;
+        let application_id = create_application_record(&transaction, input)?;
         transaction.commit().map_err(db_error)?;
         drop(connection);
 
@@ -2650,6 +2591,73 @@ impl Database {
             .into_iter()
             .find(|item| item.id == id))
     }
+}
+
+pub(super) fn create_application_record(
+    transaction: &rusqlite::Transaction<'_>,
+    input: CreateApplicationInput,
+) -> Result<String, String> {
+    let company_name = required(input.company_name, "公司名称")?;
+    let position_title = required(input.position_title, "岗位名称")?;
+    let website = clean_external_url(input.website, "公司官网")?;
+    let source_url = clean_external_url(input.source_url, "招聘链接")?;
+    let priority = input.priority.unwrap_or(2);
+    let applied_at = clean_date(input.applied_at, "投递日期")?;
+    if !(1..=3).contains(&priority) {
+        return Err("优先级必须在 1 到 3 之间".to_string());
+    }
+
+    let company_id = transaction
+        .query_row(
+            "SELECT id FROM companies WHERE name = ?1 COLLATE NOCASE AND deleted_at IS NULL",
+            [&company_name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO companies(id, name) VALUES (?1, ?2)",
+            params![company_id, company_name],
+        )
+        .map_err(db_error)?;
+    transaction.execute(
+        "UPDATE companies SET short_name=COALESCE(?2,short_name),industry=COALESCE(?3,industry),company_type=COALESCE(?4,company_type),website=COALESCE(?5,website),notes=COALESCE(?6,notes),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?1",
+        params![company_id, clean(input.company_short_name), clean(input.industry), clean(input.company_type), website, clean(input.company_notes)],
+    ).map_err(db_error)?;
+
+    let position_id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO positions(id, company_id, title, department, location, recruitment_type, job_code, source_url, jd_raw) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![position_id, company_id, position_title, clean(input.department), clean(input.location), clean(input.recruitment_type), clean(input.job_code), source_url, clean(input.jd_raw)],
+    ).map_err(db_error)?;
+
+    let resume_profile_id = match clean(input.resume_profile_id) {
+        Some(id) => transaction
+            .query_row(
+                "SELECT id FROM resume_profiles WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL",
+                [&id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "选择的简历不存在或已归档".to_string())?
+            .into(),
+        None => None,
+    };
+    let application_id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "INSERT INTO applications(id, position_id, applied_at, channel, priority, resume_profile_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![application_id, position_id, applied_at.clone(), clean(input.channel), priority, resume_profile_id],
+    ).map_err(db_error)?;
+    transaction.execute(
+        "INSERT INTO application_events(id, application_id, event_type, title, source_type, stage_after, happened_at)
+         VALUES (?1, ?2, 'application_created', '创建投递', 'manual', '已投递',
+                 COALESCE(?3 || 'T00:00:00.000Z', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))",
+        params![Uuid::new_v4().to_string(), application_id, applied_at],
+    ).map_err(db_error)?;
+    Ok(application_id)
 }
 
 fn query_tasks(

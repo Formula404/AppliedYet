@@ -54,17 +54,26 @@ export const demoAnalytics = (): AnalyticsData => ({
 });
 
 const initialEmails: RecruitmentEmail[] = [
-  { id: "demo-mail-1", sender: "campus@antgroup.com", subject: "蚂蚁集团技术一面安排", receivedAt: iso(0, 8, 42), snippet: "感谢投递后端开发工程师岗位，诚邀你参加技术一面。", bodyText: "你好！你的技术一面安排在今天 14:00，请提前 10 分钟进入会议。面试将重点沟通项目经历与系统设计。", links: [{ label: "进入面试会议", url: "https://meeting.example.com/ant-demo" }], category: "面试安排", suggestedStage: "面试中", status: "confirmed", matchedApplicationId: "ant", company: "蚂蚁集团", role: "后端开发工程师", currentStage: "面试中", confidence: 98, reasons: ["公司域名一致", "岗位名称一致", "邮件含面试时间"] },
-  { id: "demo-mail-2", sender: "recruiting@bytedance.com", subject: "面试通过及后续安排", receivedAt: iso(-1, 18, 16), snippet: "恭喜通过本轮技术面试，后续面试时间将另行通知。", bodyText: "恭喜你通过研发工程师岗位第一轮技术面试。我们将在两个工作日内与你确认下一轮时间。", links: [], category: "面试结果", suggestedStage: "面试中", status: "confirmed", matchedApplicationId: "bytedance", company: "字节跳动", role: "研发工程师", currentStage: "一面通过", confidence: 96, reasons: ["公司名称命中", "岗位一致", "通过语义明确"] },
+  { id: "demo-mail-1", sender: "campus@antgroup.com", subject: "蚂蚁集团技术一面安排", receivedAt: iso(0, 8, 42), snippet: "感谢投递后端开发工程师岗位，诚邀你参加技术一面。", bodyText: "你好！你的技术一面安排在今天 14:00，请提前 10 分钟进入会议。面试将重点沟通项目经历与系统设计。", links: [{ label: "进入面试会议", url: "https://meeting.example.com/ant-demo" }], category: "面试邀请", suggestedStage: "面试中", status: "confirmed", matchedApplicationId: "ant", company: "蚂蚁集团", role: "后端开发工程师", currentStage: "面试中", confidence: 98, reasons: ["公司域名一致", "岗位名称一致", "邮件含面试时间"] },
+  { id: "demo-mail-2", sender: "recruiting@bytedance.com", subject: "面试通过及后续安排", receivedAt: iso(-1, 18, 16), snippet: "恭喜通过本轮技术面试，后续面试时间将另行通知。", bodyText: "恭喜你通过研发工程师岗位第一轮技术面试。我们将在两个工作日内与你确认下一轮时间。", links: [], category: "结果通知 · 流程进展", suggestedStage: "等待结果", status: "confirmed", matchedApplicationId: "bytedance", company: "字节跳动", role: "研发工程师", currentStage: "等待结果", confidence: 96, reasons: ["公司名称命中", "岗位一致", "通过语义明确"] },
   { id: "demo-mail-3", sender: "talent@meituan.com", subject: "关于 Java 开发岗位的进一步沟通", receivedAt: iso(-2, 11, 8), snippet: "希望与你电话沟通当前求职进展和岗位意向。", bodyText: "你好，我们希望进一步了解你的岗位意向、期望城市与薪资范围，请回复方便沟通的时间。", links: [], category: "HR 沟通", suggestedStage: "等待结果", status: "pending", matchedApplicationId: "meituan", company: "美团", role: "Java 开发工程师", currentStage: "HR 沟通", confidence: 82, reasons: ["公司与岗位匹配", "阶段语义可能为 HR 面或 Offer 沟通，需人工确认"] },
-  { id: "demo-mail-4", sender: "no-reply@hackerrank.com", subject: "Online Assessment Reminder - Backend", receivedAt: iso(-2, 9, 35), snippet: "Your assessment invitation will expire tonight.", bodyText: "This is a reminder that your backend online assessment expires at 23:59 today.", links: [{ label: "Start assessment", url: "https://assessment.example.com/demo" }], category: "测评提醒", suggestedStage: "在线测评", status: "confirmed", matchedApplicationId: "shopee", company: "Shopee", role: "平台开发工程师", currentStage: "在线测评", confidence: 91, reasons: ["岗位关键词匹配", "测评链接与截止时间明确"] },
-  { id: "demo-mail-5", sender: "hr@startup-example.com", subject: "后端工程师面试邀请", receivedAt: iso(-3, 16, 20), snippet: "我们在招聘网站看到了你的资料，希望约一次线上沟通。", bodyText: "你好，我们是一家企业服务创业公司，希望邀请你参加后端工程师线上面试。", links: [], category: "面试邀请", suggestedStage: "面试中", status: "unmatched", confidence: 43, reasons: ["没有找到对应投递", "公司名称未出现在现有记录"] },
+  { id: "demo-mail-4", sender: "no-reply@hackerrank.com", subject: "Online Assessment Reminder - Backend", receivedAt: iso(-2, 9, 35), snippet: "Your assessment invitation will expire tonight.", bodyText: "This is a reminder that your backend online assessment expires at 23:59 today.", links: [{ label: "Start assessment", url: "https://assessment.example.com/demo" }], category: "测评邀请", suggestedStage: "在线测评", status: "confirmed", matchedApplicationId: "shopee", company: "Shopee", role: "平台开发工程师", currentStage: "在线测评", confidence: 91, reasons: ["岗位关键词匹配", "测评链接与截止时间明确"] },
+  { id: "demo-mail-5", sender: "星云科技招聘 <hr@startup-example.com>", subject: "后端工程师面试邀请", receivedAt: iso(-3, 16, 20), snippet: "我们在招聘网站看到了你的资料，希望约一次线上沟通。", bodyText: "你好，我们是一家企业服务创业公司，希望邀请你参加后端工程师线上面试。", links: [], category: "面试邀请", suggestedStage: "面试中", status: "unmatched", company: "星云科技", role: "后端工程师", confidence: 43, reasons: ["没有找到对应投递", "公司名称未出现在现有记录"] },
 ];
 
 let demoEmails = initialEmails.map((item) => ({ ...item }));
 export const listDemoEmails = async () => demoEmails.map((item) => ({ ...item, links: [...item.links], reasons: [...item.reasons] }));
 export const demoEmailStats = async (): Promise<EmailStats> => ({ thisWeek: demoEmails.length, pending: demoEmails.filter((item) => item.status === "pending").length, confirmed: demoEmails.filter((item) => item.status === "confirmed").length, unmatched: demoEmails.filter((item) => item.status === "unmatched").length });
 export const setDemoEmailStatus = async (id: string, status: RecruitmentEmail["status"]) => { demoEmails = demoEmails.map((item) => item.id === id ? { ...item, status } : item); };
+export const setDemoEmailApplication = async (id: string, applicationId: string) => {
+  demoEmails = demoEmails.map((item) => item.id === id ? {
+    ...item,
+    matchedApplicationId: applicationId,
+    status: "pending",
+    confidence: 100,
+    reasons: ["用户从该邮件创建并确认关联"],
+  } : item);
+};
 
 const initialResumes: ResumeProfile[] = [
   { id: "resume-backend", name: "Java 后端 · 2026 秋招", filePath: "演示数据/张同学_后端简历.pdf", fileFormat: "pdf", parsedText: "张同学｜Java 后端开发\n某 985 高校 软件工程 硕士\n两段后端研发实习，负责订单与营销系统。", personalInfo: JSON.stringify({ name: "张同学", birthday: "2002-06-18", contact: "138****2026 · demo@example.com", links: "github.com/demo-candidate" }), educationBackground: JSON.stringify([{ startDate: "2024-09", endDate: "2027-06", school: "浙江大学", degree: "硕士", major: "软件工程" }, { startDate: "2020-09", endDate: "2024-06", school: "南京大学", degree: "本科", major: "计算机科学与技术" }]), internshipExperience: JSON.stringify([{ company: "某头部互联网公司", role: "后端研发实习生", startDate: "2025-06", endDate: "2025-10", description: "参与订单履约系统重构，将核心接口 P99 延迟降低 38%，峰值吞吐提升 2.1 倍。" }]), projectExperience: JSON.stringify([{ name: "高并发秒杀与订单平台", role: "核心开发", startDate: "2025-02", endDate: "2025-05", technologies: "Java / Spring Boot / Redis / Kafka / MySQL", description: "设计缓存、限流与异步下单链路，完成 10 万 QPS 压测与一致性对账。" }]), professionalSkills: "Java、Spring Boot、MySQL、Redis、Kafka、Docker、Kubernetes", academicAchievements: JSON.stringify([{ title: "全国大学生软件创新大赛一等奖", kind: "竞赛", date: "2024-11", link: "", description: "负责服务端架构与性能优化。" }]), skillCertificates: JSON.stringify(["CET-6", "阿里云 ACP"]), targetDirection: "Java 后端 / 平台研发", notes: "突出高并发、稳定性与工程实践", linkedApplicationCount: 7, assessmentCount: 5, interviewCount: 4, offerCount: 1, isPrimary: true, createdAt: iso(-100), updatedAt: iso(-2) },
@@ -134,4 +143,3 @@ const demoBankItems: QuestionBankItem[] = [
 ];
 
 export const listDemoQuestionBankItems = async (): Promise<QuestionBankItem[]> => demoBankItems.map((item) => ({ ...item }));
-

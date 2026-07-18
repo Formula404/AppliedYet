@@ -2296,6 +2296,31 @@ textarea { resize: vertical; }
   flex: 0 0 auto
 }
 
+.email-import-notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0 22px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--blue-soft);
+  color: var(--text-secondary);
+  font-size: 10px
+}
+
+.email-import-notice strong {
+  color: var(--primary);
+  font-size: 11px;
+  white-space: nowrap
+}
+
+.application-dialog > .settings-notice {
+  flex: 0 0 auto;
+  margin: 0 22px 12px
+}
+
 .application-dialog > form {
   display: flex;
   flex: 1 1 auto;

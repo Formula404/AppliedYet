@@ -222,6 +222,24 @@ pub(crate) fn rematch_email(db: tauri::State<'_, Database>, id: String) -> Resul
     db.rematch_email(&id)
 }
 
+#[tauri::command]
+pub(crate) fn attach_email_to_application(
+    db: tauri::State<'_, Database>,
+    email_id: String,
+    application_id: String,
+) -> Result<(), String> {
+    db.attach_email_to_application(&email_id, &application_id)
+}
+
+#[tauri::command]
+pub(crate) fn create_application_from_email(
+    db: tauri::State<'_, Database>,
+    email_id: String,
+    input: crate::db::CreateApplicationInput,
+) -> Result<crate::db::ApplicationListItem, String> {
+    db.create_application_from_email(&email_id, input)
+}
+
 fn fetch_imap(
     settings: crate::db::EmailAccountSettings,
     auth: EmailAuth,

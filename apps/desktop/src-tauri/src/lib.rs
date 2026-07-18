@@ -96,6 +96,8 @@ pub fn run() {
             commands::email::confirm_email_match,
             commands::email::ignore_email,
             commands::email::rematch_email,
+            commands::email::attach_email_to_application,
+            commands::email::create_application_from_email,
             commands::experience::list_interview_experience_sources,
             commands::experience::import_interview_experience_link,
             commands::experience::create_manual_interview_experience,
