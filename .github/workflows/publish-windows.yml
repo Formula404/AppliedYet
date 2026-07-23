@@ -37,7 +37,7 @@ jobs:
           projectPath: apps/desktop
           tagName: app-v__VERSION__
           releaseName: 投了吗 v__VERSION__
-          releaseBody: 请在发布前补充本版本的更新说明。
+          releaseBody: ""
           releaseDraft: true
           prerelease: false
           args: --bundles nsis

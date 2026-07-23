@@ -1,0 +1,36 @@
+name: Sync release notes to updater manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to synchronize
+        required: true
+        type: string
+  release:
+    types:
+      - published
+      - edited
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: Download updater manifest
+        run: gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir updater-manifest
+
+      - name: Copy release notes into updater manifest
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body \
+            > updater-manifest/release.json
+          jq --slurpfile release updater-manifest/release.json '.notes = $release[0].body' \
+            updater-manifest/latest.json > updater-manifest/latest.updated.json
+          mv updater-manifest/latest.updated.json updater-manifest/latest.json
+
+      - name: Upload updated updater manifest
+        run: gh release upload "$RELEASE_TAG" updater-manifest/latest.json --repo "$GITHUB_REPOSITORY" --clobber
