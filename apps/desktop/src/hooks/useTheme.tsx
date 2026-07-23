@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { setWindowTheme } from "../services/windowTheme";
 
 export type ThemeMode = "light" | "dark" | "system";
 type ResolvedTheme = "light" | "dark";
@@ -53,6 +54,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     applyTheme(resolved);
+    void setWindowTheme(resolved).catch((error) => {
+      console.error("无法同步原生窗口主题", error);
+    });
   }, [resolved]);
 
   const setMode = (m: ThemeMode) => setModeState(m);

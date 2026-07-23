@@ -2,6 +2,7 @@
   font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
   color: #172033;
   background: var(--bg);
+  color-scheme: light;
   font-synthesis: none;
   --bg: #f6f8fb;
   --surface: #fff;
@@ -49,9 +50,10 @@
 [data-theme="dark"] {
   color: #e4e6ef;
   background: #0f1117;
+  color-scheme: dark;
   --bg: #0f1117;
   --surface: #1a1d27;
-  --surface-hover: #242736;
+  --surface-hover: #222633;
   --text: #e4e6ef;
   --text-secondary: #c4c6d4;
   --text-placeholder: #6b7084;
@@ -109,6 +111,17 @@ input,
 select,
 textarea {
   font-size: var(--font-input)
+}
+
+select {
+  color: var(--text);
+  background-color: var(--surface)
+}
+
+select option,
+select optgroup {
+  color: var(--text);
+  background-color: var(--surface)
 }
 
 input::placeholder,
