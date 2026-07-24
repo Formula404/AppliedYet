@@ -7,6 +7,8 @@ import { hasLocalDatabase } from "../../services/applications";
 import { generateInterviewPreparation, getLatestInterviewPreparation, listApplicationAiCalls, type AiCallSummary, type StoredInterviewPreparation } from "../../services/ai";
 import { requestAiSendConfirmation } from "../../services/settings";
 import { openExternalUrl } from "../../services/external";
+import { requestConfirmation, showError, showSuccess } from "../../services/feedback";
+import { trackOperation } from "../../services/operations";
 
 const isValidWebUrl = (value: string) => {
   try { return ["http:", "https:"].includes(new URL(value).protocol); } catch { return false; }
@@ -49,6 +51,14 @@ export default function PreparationPage() {
       .catch((reason) => setAiError(String(reason)));
   }, [selected?.id]);
 
+  useEffect(() => {
+    if (experienceError) showError(experienceError, "面经操作失败");
+  }, [experienceError]);
+
+  useEffect(() => {
+    if (aiError) showError(aiError, "AI 面试准备失败");
+  }, [aiError]);
+
   if (!selected) return <Card><div className="interview-empty"><Link2 size={32}/><h3>当前没有需要准备的岗位</h3><p>已拒绝或已获得 Offer 的投递不会出现在这里。</p></div></Card>;
 
   const submitLink = async () => {
@@ -56,12 +66,17 @@ export default function PreparationPage() {
     if (!validUrl || importing) return;
     setImporting(true); setExperienceError("");
     try {
-      const created = await importExperienceLink(selected.id, url.trim());
-      setExpandedLinkId(created.id);
-      setUrl("");
-      setUrlTouched(false);
-      setAnalyzingId(created.id);
-      await analyzeExperienceLink(created.id);
+      await trackOperation("导入并分析网页面经", async (operation) => {
+        operation.update("正在保存网页来源");
+        const created = await importExperienceLink(selected.id, url.trim());
+        setExpandedLinkId(created.id);
+        setUrl("");
+        setUrlTouched(false);
+        setAnalyzingId(created.id);
+        operation.update("正在读取网页并提取面试问题");
+        await analyzeExperienceLink(created.id);
+      }, selected.company);
+      showSuccess("网页内容已分析，识别到的问题已经加入当前岗位。", "面经导入完成");
     } catch (reason) {
       setExperienceError(String(reason));
     } finally {
@@ -75,10 +90,11 @@ export default function PreparationPage() {
     if (!parsedManualQuestions.length || importing) return;
     setImporting(true); setExperienceError("");
     try {
-      const created = await addManualExperience(selected.id, manualTitle.trim(), parsedManualQuestions);
+      const created = await trackOperation("保存人工面经", () => addManualExperience(selected.id, manualTitle.trim(), parsedManualQuestions), `${parsedManualQuestions.length} 道问题`);
       setExpandedLinkId(created.id);
       setManualTitle("");
       setManualQuestions("");
+      showSuccess("人工整理的问题已加入当前岗位。", "面经已保存");
     } catch (reason) {
       setExperienceError(String(reason));
     } finally {
@@ -89,23 +105,26 @@ export default function PreparationPage() {
   const retryAnalysis = async (id: string) => {
     if (analyzingId) return;
     setAnalyzingId(id); setExperienceError("");
-    try { await analyzeExperienceLink(id); }
+    try { await trackOperation("重新分析网页面经", () => analyzeExperienceLink(id)); showSuccess("已重新提取网页中的面试问题。", "分析完成"); }
     catch (reason) { setExperienceError(String(reason)); }
     finally { setAnalyzingId(undefined); }
   };
 
-  const reanalyze = (id: string) => {
-    if (!window.confirm("重新提取会覆盖这份来源中已经编辑过的问题，确定继续吗？")) return;
-    retryAnalysis(id);
+  const reanalyze = async (id: string) => {
+    const confirmed = await requestConfirmation({ title: "重新提取面经？", message: "重新提取会覆盖这份来源中已经编辑过的问题。", confirmLabel: "重新提取", kind: "warning" });
+    if (!confirmed) return;
+    await retryAnalysis(id);
   };
 
   const removeExperience = async (id: string, title: string) => {
-    if (!window.confirm(`确定删除“${title}”吗？删除后其中的面试题将不再用于模拟面试。`)) return;
+    const confirmed = await requestConfirmation({ title: "删除面经来源？", message: `“${title}”及其中的问题将不再用于模拟面试。`, confirmLabel: "确认删除", kind: "danger" });
+    if (!confirmed) return;
     setDeletingId(id); setExperienceError("");
     try {
-      await deleteExperienceSource(id);
+      await trackOperation("删除面经来源", () => deleteExperienceSource(id), title);
       if (expandedLinkId === id) setExpandedLinkId(undefined);
       if (questionEditor?.sourceId === id) setQuestionEditor(undefined);
+      showSuccess("面经来源及其问题已删除。", "删除完成");
     } catch (reason) { setExperienceError(String(reason)); }
     finally { setDeletingId(undefined); }
   };
@@ -121,21 +140,24 @@ export default function PreparationPage() {
     questions[questionEditor.index] = value;
     setQuestionSaving(savingKey); setExperienceError("");
     try {
-      await updateExperienceQuestions(source.id, questions);
+      await trackOperation("保存面经问题", () => updateExperienceQuestions(source.id, questions));
       setQuestionEditor(undefined);
+      showSuccess("问题内容已保存。");
     } catch (reason) { setExperienceError(String(reason)); }
     finally { setQuestionSaving(""); }
   };
 
   const removeQuestion = async (sourceId: string, index: number, question: string) => {
-    if (!window.confirm(`确定删除这道问题吗？\n\n${question}`)) return;
+    const confirmed = await requestConfirmation({ title: "删除这道问题？", message: question, confirmLabel: "确认删除", kind: "danger" });
+    if (!confirmed) return;
     const source = experienceLinks.find((item) => item.id === sourceId);
     if (!source) return;
     const savingKey = `${sourceId}:${index}`;
     setQuestionSaving(savingKey); setExperienceError("");
     try {
-      await updateExperienceQuestions(sourceId, source.questions.filter((_, questionIndex) => questionIndex !== index));
+      await trackOperation("删除面经问题", () => updateExperienceQuestions(sourceId, source.questions.filter((_, questionIndex) => questionIndex !== index)));
       if (questionEditor?.sourceId === sourceId) setQuestionEditor(undefined);
+      showSuccess("问题已从面经中删除。", "删除完成");
     } catch (reason) { setExperienceError(String(reason)); }
     finally { setQuestionSaving(""); }
   };
@@ -154,9 +176,10 @@ export default function PreparationPage() {
     try {
       const confirmed = !selected.resumeName || await requestAiSendConfirmation(`将把”${selected.resumeName}”和岗位信息发给 AI 服务，用来匹配简历和面试准备。是否继续？`);
       if (!confirmed) return;
-      const generated = await generateInterviewPreparation(selected.id, confirmed);
+      const generated = await trackOperation("生成 AI 面试准备建议", () => generateInterviewPreparation(selected.id, confirmed), `${selected.company} · ${selected.role}`);
       setPreparation(generated);
       setAiCalls(await listApplicationAiCalls(selected.id));
+      showSuccess("已结合岗位与简历生成新的面试准备建议。", "AI 建议生成完成");
     } catch (reason) { setAiError(String(reason)); } finally { setGenerating(false); }
   };
 
@@ -183,7 +206,6 @@ export default function PreparationPage() {
       <Card className="ai-preparation-card">
         <CardHeader title="AI 面试准备建议" subtitle="根据岗位信息和简历为你生成个性化的面试准备建议"/>
         <div className="ai-preparation-toolbar"><div><Sparkles size={18}/><span>{preparation ? `上次生成：${new Date(preparation.createdAt).toLocaleString("zh-CN")} · ${preparation.model}` : "尚未生成真实建议"}</span></div><button className="button button--primary" disabled={generating} onClick={generatePreparation}><Sparkles size={15}/>{generating ? "生成中…" : preparation ? "重新生成" : "生成准备建议"}</button></div>
-        {aiError && <p className="field-error ai-preparation-error">{aiError}</p>}
         {!hasLocalDatabase && <p className="link-import-note">当前为预览模式，展示的是示例数据，不会涉及你的真实信息。</p>}
         {preparation && <div className="ai-preparation-result">
           <p className="ai-preparation-summary">{preparation.content.summary}</p>
@@ -206,7 +228,6 @@ export default function PreparationPage() {
 
       <Card className="experience-links-card">
         <CardHeader title="该岗位的面经来源" subtitle={`${links.length} 个来源 · 已提取 ${extractedCount} 道题`}/>
-        {experienceError && <p className="field-error experience-operation-error">{experienceError}</p>}
         <div className="experience-link-list">{links.length ? links.map((link) => <article key={link.id} className={expandedLinkId === link.id ? "expanded" : ""}>
           <div className="experience-link-row"><button className="experience-link-main" onClick={() => setExpandedLinkId(expandedLinkId === link.id ? undefined : link.id)}>
               <span className="stat-icon blue">{link.source === "link" ? <Link2/> : <PencilLine/>}</span>

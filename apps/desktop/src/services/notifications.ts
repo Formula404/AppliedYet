@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { hasLocalDatabase } from "./applications";
+import { showError } from "./feedback";
 
 interface DueTaskReminder {
   taskId: string;
@@ -20,6 +21,7 @@ let schedulerTimer: number | undefined;
 let activePoll: Promise<void> | undefined;
 let permissionResult: boolean | undefined;
 let permissionRequest: Promise<boolean> | undefined;
+const reportedReminderErrors = new Set<string>();
 
 const ensurePermission = () => {
   if (permissionResult !== undefined) return Promise.resolve(permissionResult);
@@ -57,6 +59,10 @@ const pollDueTaskReminders = async () => {
     } catch (error) {
       // One locked/deleted task must not prevent the rest of this due batch from firing.
       console.error(`任务通知发送失败: ${reminder.taskId}`, error);
+      if (!reportedReminderErrors.has(reminder.taskId)) {
+        reportedReminderErrors.add(reminder.taskId);
+        showError(error, `“${reminder.title}”提醒发送失败`);
+      }
     }
   }
 };
@@ -64,7 +70,13 @@ const pollDueTaskReminders = async () => {
 const runPoll = () => {
   if (activePoll) return activePoll;
   activePoll = pollDueTaskReminders()
-    .catch((error) => console.error("任务通知调度失败", error))
+    .catch((error) => {
+      console.error("任务通知调度失败", error);
+      if (!reportedReminderErrors.has("scheduler")) {
+        reportedReminderErrors.add("scheduler");
+        showError(error, "任务提醒调度失败");
+      }
+    })
     .finally(() => { activePoll = undefined; });
   return activePoll;
 };

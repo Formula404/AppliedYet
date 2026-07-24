@@ -7,6 +7,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { hasLocalDatabase } from "../../services/applications";
 import type { ProcessingJobSummary } from "../../services/ai";
 import { requestAiSendConfirmation } from "../../services/settings";
+import { requestConfirmation, showError, showSuccess } from "../../services/feedback";
+import { trackOperation } from "../../services/operations";
 
 type Filter = "全部" | InterviewSession["type"];
 type ReviewView = "records" | "materials";
@@ -48,7 +50,7 @@ export default function ReviewsPage() {
   const [params] = useSearchParams();
   const {
     applications, sessions, reviewSession, deleteSession, importProcessingJob, processInterviewMaterial,
-    processingJobs: jobs, processingJobsLoading: jobsLoading, processingJobsError: jobsError,
+    processingJobs: jobs, processingJobsLoading: jobsLoading,
     processingJobsHasMore, processingRequestCount, refreshProcessingJobs, loadMoreProcessingJobs,
     getProcessingJobText, updateProcessingJobText, deleteProcessingJob,
   } = useInterviewFlow();
@@ -85,6 +87,10 @@ export default function ReviewsPage() {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [busy]);
+
+  useEffect(() => {
+    if (processingError) showError(processingError, "面试复盘操作失败");
+  }, [processingError]);
 
   const estimatedDuration = (job: ProcessingJobSummary) => {
     if (job.importStatus === "running") {
@@ -150,7 +156,7 @@ export default function ReviewsPage() {
   const openEditor = async (job: ProcessingJobSummary) => {
     setEditor({ jobId: job.id, fileName: fileName(job.sourcePath), text: "", loading: true, saving: false });
     try {
-      const text = await getProcessingJobText(job.id);
+      const text = await trackOperation("读取面试材料文字", () => getProcessingJobText(job.id), fileName(job.sourcePath));
       setEditor({ jobId: job.id, fileName: fileName(job.sourcePath), text, loading: false, saving: false });
     } catch (reason) {
       setEditor(undefined);
@@ -162,7 +168,7 @@ export default function ReviewsPage() {
     if (!editor || editor.loading || editor.saving) return;
     setEditor({ ...editor, saving: true });
     try {
-      await updateProcessingJobText(editor.jobId, editor.text);
+      await trackOperation("保存面试材料文字", () => updateProcessingJobText(editor.jobId, editor.text), editor.fileName);
       setEditor(undefined);
     } catch (reason) {
       setEditor({ ...editor, saving: false });
@@ -171,9 +177,15 @@ export default function ReviewsPage() {
   };
 
   const removeJob = async (job: ProcessingJobSummary) => {
-    if (!window.confirm(`确定删除“${fileName(job.sourcePath)}”的处理记录和转写文字吗？${job.interviewSessionId ? "已经生成的面试记录会保留。" : ""}`)) return;
+    const confirmed = await requestConfirmation({
+      title: "删除材料处理记录？",
+      message: `“${fileName(job.sourcePath)}”的处理记录和转写文字将被删除。${job.interviewSessionId ? "已经生成的面试记录会保留。" : ""}`,
+      confirmLabel: "确认删除",
+      kind: "danger",
+    });
+    if (!confirmed) return;
     try {
-      await deleteProcessingJob(job.id);
+      await trackOperation("删除材料处理记录", () => deleteProcessingJob(job.id), fileName(job.sourcePath));
     } catch (reason) {
       setProcessingError(String(reason));
     }
@@ -186,12 +198,19 @@ export default function ReviewsPage() {
   };
 
   const removeSession = async (session: InterviewSession) => {
-    if (!window.confirm(`确定删除这场“${session.round}”面试记录吗？逐题回答和 AI 评价会一并删除，但原材料处理记录会保留。`)) return;
+    const confirmed = await requestConfirmation({
+      title: "删除面试记录？",
+      message: `这场“${session.round}”的逐题回答和 AI 评价会一并删除，但原材料处理记录会保留。`,
+      confirmLabel: "确认删除",
+      kind: "danger",
+    });
+    if (!confirmed) return;
     setDeletingSession(true);
     try {
-      await deleteSession(session.id);
+      await trackOperation("删除面试记录", () => deleteSession(session.id), session.round);
       setSelectedId(undefined);
       await refreshProcessingJobs();
+      showSuccess("面试记录已删除，原材料处理记录仍然保留。", "删除完成");
     } catch (reason) {
       setProcessingError(String(reason));
     } finally {
@@ -228,12 +247,10 @@ export default function ReviewsPage() {
         <div><strong>第一步：提取面试文字</strong><p>解析完成后不会自动发送给 AI。请先检查、编辑文字，再决定是否生成面试记录。</p></div>
         <label><span>关联岗位（拒绝或已归档投递也可复盘）</span><select value={reviewApplications.find((item) => item.id === importApplicationId)?.id ?? reviewApplications.find((item) => item.id === application?.id)?.id ?? reviewApplications[0]?.id ?? ""} onChange={(event) => setImportApplicationId(event.target.value)}>{reviewApplications.map((item) => <option key={item.id} value={item.id}>{item.company} · {item.role}{item.archived ? " · 已归档" : ""}{item.stage.includes("拒绝") ? " · 已拒绝" : ""}</option>)}</select></label>
         <div><button className="button button--secondary" disabled={busy || !hasLocalDatabase || !reviewApplications.length} onClick={() => void chooseAndProcess("document")}><FileText size={15}/>解析文档</button><button className="button button--secondary" disabled={busy || !hasLocalDatabase || !reviewApplications.length} onClick={() => void chooseAndProcess("audio")}><Mic2 size={15}/>转写音频</button></div>
-        {processingError && <p className="field-error">{processingError}</p>}
       </Card>
 
       <Card className="review-processing-card">
         <div className="review-processing-heading"><div><strong>第二步：确认文字并生成记录</strong><p>状态保存在本地；切换页面时可通过侧边栏查看运行数量，完成或失败会全局通知。</p></div><button className="text-button" disabled={jobsLoading} onClick={() => void refreshProcessingJobs()}><RefreshCw size={14}/>{jobsLoading ? "刷新中" : "刷新"}</button></div>
-        {jobsError && <p className="field-error">{jobsError}</p>}
         {!jobsLoading && !jobs.length && <div className="review-processing-empty">还没有上传过面试材料</div>}
         <div className="review-processing-list">{jobs.map((job) => {
           const related = applications.find((item) => item.id === job.applicationId);
@@ -269,9 +286,8 @@ export default function ReviewsPage() {
       </div>
 
       <div className="review-record-content">
-      {processingError && <div className="review-record-error"><span>{processingError}</span><button className="icon-button" title="关闭" onClick={() => setProcessingError("")}><X size={14}/></button></div>}
       {selected && application ? <>
-        <Card className="review-summary"><div><Badge tone={selected.type === "真实面试" ? "blue" : "purple"}>{selected.type}</Badge><h2>{application.company} · {application.role}</h2><p>{selected.round} · {sessionTime(selected.createdAt)} · {selected.duration}</p>{selected.reviewSummary && <small className="review-overall-summary">{selected.reviewSummary}</small>}</div><div className="review-summary-actions"><div className="review-score"><strong>{averageScore ?? "—"}</strong><span>平均分<small>{scored.length}/{selected.questions.length} 题已评价</small></span></div>{selected.status !== "进行中" && <button className="button button--primary" disabled={reviewing || deletingSession} onClick={async () => { setReviewing(true); setProcessingError(""); try { const confirmed = await requestAiSendConfirmation("将把本场问题与回答发给 AI 服务进行逐题评价。是否继续？"); if (confirmed) await reviewSession(selected.id, confirmed); } catch (reason) { setProcessingError(String(reason)); } finally { setReviewing(false); } }}><Sparkles size={14}/>{reviewing ? "复盘生成中…" : selected.status === "复盘完成" ? "重新生成复盘" : "生成 AI 复盘"}</button>}<button className="icon-button danger-text" title="删除面试记录" disabled={deletingSession || reviewing} onClick={() => void removeSession(selected)}><Trash2 size={15}/></button></div></Card>
+        <Card className="review-summary"><div><Badge tone={selected.type === "真实面试" ? "blue" : "purple"}>{selected.type}</Badge><h2>{application.company} · {application.role}</h2><p>{selected.round} · {sessionTime(selected.createdAt)} · {selected.duration}</p>{selected.reviewSummary && <small className="review-overall-summary">{selected.reviewSummary}</small>}</div><div className="review-summary-actions"><div className="review-score"><strong>{averageScore ?? "—"}</strong><span>平均分<small>{scored.length}/{selected.questions.length} 题已评价</small></span></div>{selected.status !== "进行中" && <button className="button button--primary" disabled={reviewing || deletingSession} onClick={async () => { setReviewing(true); setProcessingError(""); try { const confirmed = await requestAiSendConfirmation("将把本场问题与回答发给 AI 服务进行逐题评价。是否继续？"); if (confirmed) { await trackOperation("生成 AI 面试复盘", () => reviewSession(selected.id, confirmed), `${application.company} · ${selected.round}`); showSuccess("逐题评价与整体复盘已经更新。", "AI 复盘生成完成"); } } catch (reason) { setProcessingError(String(reason)); } finally { setReviewing(false); } }}><Sparkles size={14}/>{reviewing ? "复盘生成中…" : selected.status === "复盘完成" ? "重新生成复盘" : "生成 AI 复盘"}</button>}<button className="icon-button danger-text" title="删除面试记录" disabled={deletingSession || reviewing} onClick={() => void removeSession(selected)}><Trash2 size={15}/></button></div></Card>
         <div className="review-question-heading"><div><h3>逐题记录</h3><p>问题和回答放在一起，方便回看每道题的表现</p></div><span>{selected.questions.length} 道题</span></div>
         <div className="review-question-list">{selected.questions.map((question, index) => <Card className="review-question-card" key={question.id}>
           <div className="review-question-title"><span>{index + 1}</span><div><Badge tone={question.source === "面经" ? "green" : question.source === "AI 简历题" ? "purple" : "blue"}>{question.source}</Badge><h3>{question.prompt}</h3></div>{question.score !== undefined && <strong className={`question-score ${question.score >= 80 ? "good" : question.score < 60 ? "weak" : ""}`}>{question.score}<small>/100</small></strong>}</div>

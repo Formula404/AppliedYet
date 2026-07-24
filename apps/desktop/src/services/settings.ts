@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { hasLocalDatabase } from "./applications";
+import { requestConfirmation } from "./feedback";
 
 export interface AiProviderSettings {
   provider: string;
@@ -98,7 +99,13 @@ export function getProviderSettings() {
 export async function requestAiSendConfirmation(message: string) {
   if (!hasLocalDatabase) return true;
   const { ai } = await getProviderSettings();
-  return !ai.promptBeforeSend || window.confirm(message);
+  return !ai.promptBeforeSend || requestConfirmation({
+    title: "确认发送给 AI",
+    message,
+    confirmLabel: "同意并继续",
+    cancelLabel: "取消",
+    kind: "info",
+  });
 }
 
 export function saveAiProviderSettings(settings: AiProviderSettings) {

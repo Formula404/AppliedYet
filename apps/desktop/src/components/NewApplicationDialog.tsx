@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import type { Application } from "../types";
 import type { CreateApplicationInput } from "../services/applications";
 import { listResumeProfiles, type ResumeProfile } from "../services/resumes";
+import { showError } from "../services/feedback";
 
 export interface NewApplicationDefaults {
   companyName?: string;
@@ -35,12 +36,11 @@ export function NewApplicationDialog({
   onError,
 }: NewApplicationDialogProps) {
   const [resumes, setResumes] = useState<ResumeProfile[]>([]);
-  const [resumeError, setResumeError] = useState("");
 
   useEffect(() => {
     listResumeProfiles()
       .then((items) => setResumes(items.filter((item) => !item.archivedAt)))
-      .catch((reason) => setResumeError(String(reason)));
+      .catch((reason) => showError(`${String(reason)}。仍可先创建投递。`, "简历列表读取失败"));
   }, []);
 
   return (
@@ -51,7 +51,6 @@ export function NewApplicationDialog({
           <button type="button" onClick={onClose} disabled={saving} aria-label="关闭"><X size={19} /></button>
         </div>
         {emailStage && <div className="email-import-notice"><strong>来自招聘邮件 · {emailStage}</strong><span>保存后会关联原邮件，并把识别到的阶段写入流程时间线。</span></div>}
-        {resumeError && <div className="settings-notice">简历列表读取失败：{resumeError}。仍可先创建投递。</div>}
         <form onSubmit={async (event) => {
           event.preventDefault();
           const data = new FormData(event.currentTarget);

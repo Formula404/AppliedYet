@@ -5,6 +5,8 @@ import { Badge, Card, CardHeader } from "../components/ui";
 import { getDashboard, type DashboardData, type DashboardEvent } from "../services/dashboard";
 import { hasLocalDatabase, setApplicationTaskStatus } from "../services/applications";
 import type { StatusTone } from "../types";
+import { showError, showSuccess } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 
 const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const systemTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -65,6 +67,7 @@ export default function HomePage() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => () => { loadRequest.current += 1; }, []);
+  useEffect(() => { if (error && !loading) showError(error, "首页数据读取失败"); }, [error, loading]);
 
   const cells = useMemo(() => buildCalendar(month), [month]);
   const eventsByDay = useMemo(() => data.events.reduce<Record<string, DashboardEvent[]>>((result, item) => {
@@ -93,17 +96,17 @@ export default function HomePage() {
     const nextStatus = task.status === "done" ? "todo" : "done";
     try {
       if (hasLocalDatabase) {
-        await setApplicationTaskStatus(task.id, nextStatus);
+        await trackOperation(nextStatus === "done" ? "完成今日任务" : "重新打开今日任务", () => setApplicationTaskStatus(task.id, nextStatus), task.title);
         await load();
       } else {
         setData((current) => ({ ...current, tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: nextStatus } : item) }));
       }
+      showSuccess(nextStatus === "done" ? "任务已标记为完成。" : "任务已恢复为待完成。", "任务状态已更新");
     } catch (reason) { setError(String(reason)); }
   };
 
   return <div className="calendar-page page-enter">
     <div className="calendar-page-heading"><div><h1>日历</h1><p>一眼看清今天的安排和求职进展</p></div>{loading && <span className="dashboard-loading">正在同步本地数据…</span>}</div>
-    {error && <div className="detail-error">首页数据读取失败：{error}</div>}
     <div className="home-kpis">{kpis.map(([label, value, tone, note]) => <button key={label} className={`home-kpi home-kpi--${tone}`} onClick={() => navigate("/applications")}><span>{label}</span><strong>{value}</strong><small>{note}</small></button>)}</div>
     <div className="calendar-layout">
       <Card className="calendar-card">

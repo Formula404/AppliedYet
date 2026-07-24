@@ -6,7 +6,8 @@ import { hasLocalDatabase } from "../services/applications";
 import { testAiProvider } from "../services/ai";
 import { authorizeEmailOAuth } from "../services/emails";
 import StructuredResumeSettings from "./StructuredResumeSettings";
-import { showToast } from "../services/toast";
+import { requestConfirmation, showFeedback } from "../services/feedback";
+import { startOperation, trackOperation } from "../services/operations";
 import { openExternalUrl } from "../services/external";
 import { checkForUpdate, currentAppVersion, downloadAndInstallUpdate, type AvailableUpdate } from "../services/updates";
 import {
@@ -48,8 +49,8 @@ export default function SettingsPage() {
   const [secret, setSecret] = useState({ ai_api_key: "", asr_api_key: "", email_password: "", email_oauth_refresh_token: "" });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [, setMessage] = useState("");
+  const [, setError] = useState("");
 
   useEffect(() => {
     if (!hasLocalDatabase) {
@@ -70,7 +71,7 @@ export default function SettingsPage() {
         }
         setCredentialStatus((current) => ({ ...current, ai_api_key: aiKey, asr_api_key: asrKey }));
       })
-      .catch((reason) => { if (!disposed) { setError(String(reason)); showToast(String(reason), "error"); } })
+      .catch((reason) => { if (!disposed) { setError(String(reason)); showFeedback(String(reason), "error"); } })
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
   }, []);
@@ -85,22 +86,27 @@ export default function SettingsPage() {
   async function submitAi(event: FormEvent) {
     event.preventDefault();
     setSaving(true); setError(""); setMessage("");
+    const operation = startOperation("保存 AI 服务设置", ai.provider);
     if (hasLocalDatabase) {
       try {
         await saveAiProviderSettings(ai);
-        setMessage("AI 服务设置已保存"); showToast("AI 服务设置已保存");
+        setMessage("AI 服务设置已保存"); showFeedback("AI 服务设置已保存", "success");
       } catch (reason) {
-        setError(`AI 服务设置保存失败：${String(reason)}`); showToast(`AI 服务设置保存失败：${String(reason)}`, "error");
+        operation.fail(reason);
+        setError(`AI 服务设置保存失败：${String(reason)}`); showFeedback(`AI 服务设置保存失败：${String(reason)}`, "error");
         setSaving(false);
         return;
       }
       try {
         await saveCredential("ai_api_key");
+        operation.succeed();
       } catch (reason) {
-        setError(`AI 服务设置已保存，但 API Key 保存失败：${String(reason)}`); showToast(`API Key 保存失败：${String(reason)}`, "error");
+        operation.fail(reason);
+        setError(`AI 服务设置已保存，但 API Key 保存失败：${String(reason)}`); showFeedback(`API Key 保存失败：${String(reason)}`, "error");
       }
     } else {
-      setMessage("预览模式下更改会在刷新后重置"); showToast("设置已保存（预览模式）");
+      operation.succeed("预览模式设置已暂存");
+      setMessage("预览模式下更改会在刷新后重置"); showFeedback("设置已保存（预览模式）", "success");
     }
     setSaving(false);
   }
@@ -108,28 +114,34 @@ export default function SettingsPage() {
   async function submitAsr(event: FormEvent) {
     event.preventDefault();
     setSaving(true); setError(""); setMessage("");
+    const operation = startOperation("保存语音识别设置", asr.provider);
     if (hasLocalDatabase) {
       try {
         await saveAsrProviderSettings(asr);
-        setMessage("语音识别设置已保存"); showToast("语音识别设置已保存");
+        setMessage("语音识别设置已保存"); showFeedback("语音识别设置已保存", "success");
       } catch (reason) {
-        setError(`语音识别设置保存失败：${String(reason)}`); showToast(`语音识别设置保存失败：${String(reason)}`, "error");
+        operation.fail(reason);
+        setError(`语音识别设置保存失败：${String(reason)}`); showFeedback(`语音识别设置保存失败：${String(reason)}`, "error");
         setSaving(false);
         return;
       }
       try {
         await saveCredential("asr_api_key");
+        operation.succeed();
       } catch (reason) {
-        setError(`语音识别设置已保存，但 API Key 保存失败：${String(reason)}`); showToast(`API Key 保存失败：${String(reason)}`, "error");
+        operation.fail(reason);
+        setError(`语音识别设置已保存，但 API Key 保存失败：${String(reason)}`); showFeedback(`API Key 保存失败：${String(reason)}`, "error");
       }
     } else {
-      setMessage("预览模式下更改会在刷新后重置"); showToast("设置已保存（预览模式）");
+      operation.succeed("预览模式设置已暂存");
+      setMessage("预览模式下更改会在刷新后重置"); showFeedback("设置已保存（预览模式）", "success");
     }
     setSaving(false);
   }
 
   async function submitEmail(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError(""); setMessage("");
+    const operation = startOperation("保存邮箱设置", email.emailAddress || "邮箱连接");
     try {
       if (hasLocalDatabase) {
         const account = currentEmailAccount(email, emailAccountId);
@@ -143,13 +155,15 @@ export default function SettingsPage() {
         setEmail(nextEmail);
         window.dispatchEvent(new Event("email-settings-changed"));
       }
-      setMessage("邮箱设置已保存，后续邮件检查将使用此连接"); showToast("邮箱设置已保存");
-    } catch (reason) { setError(`邮箱设置保存失败：${String(reason)}`); showToast(`邮箱设置保存失败：${String(reason)}`, "error"); }
+      operation.succeed();
+      setMessage("邮箱设置已保存，后续邮件检查将使用此连接"); showFeedback("邮箱设置已保存", "success");
+    } catch (reason) { operation.fail(reason); setError(`邮箱设置保存失败：${String(reason)}`); showFeedback(`邮箱设置保存失败：${String(reason)}`, "error"); }
     finally { setSaving(false); }
   }
 
   async function authorizeEmail() {
     setSaving(true); setError(""); setMessage("");
+    const operation = startOperation("完成邮箱 OAuth2 授权", email.emailAddress || "邮箱账户");
     try {
       const account = currentEmailAccount(email, emailAccountId);
       const accounts = email.accounts.map((item) => item.id === account.id ? account : item);
@@ -159,13 +173,15 @@ export default function SettingsPage() {
       setEmail(nextEmail);
       setCredentialStatus((current) => ({ ...current, email_oauth_refresh_token: true }));
       window.dispatchEvent(new Event("email-settings-changed"));
-      setMessage("邮箱授权成功，可以开始检查邮件了"); showToast("邮箱授权成功");
-    } catch (reason) { setError(`OAuth2 授权失败：${String(reason)}`); showToast(`OAuth2 授权失败：${String(reason)}`, "error"); }
+      operation.succeed();
+      setMessage("邮箱授权成功，可以开始检查邮件了"); showFeedback("邮箱授权成功", "success");
+    } catch (reason) { operation.fail(reason); setError(`OAuth2 授权失败：${String(reason)}`); showFeedback(`OAuth2 授权失败：${String(reason)}`, "error"); }
     finally { setSaving(false); }
   }
 
   async function removeCredential(key: CredentialKey) {
     setError(""); setMessage("");
+    const operation = startOperation("删除安全凭据");
     try {
       if (hasLocalDatabase) {
         const storedKey = key.startsWith("email_") ? emailCredentialKey(key as "email_password" | "email_oauth_refresh_token", emailAccountId) : key;
@@ -181,19 +197,23 @@ export default function SettingsPage() {
       }
       setCredentialStatus((current) => ({ ...current, [key]: false }));
       setSecret((current) => ({ ...current, [key]: "" }));
-      setMessage("凭据已从安全存储中删除"); showToast("凭据已删除");
-    } catch (reason) { setError(String(reason)); showToast(String(reason), "error"); }
+      operation.succeed();
+      setMessage("凭据已从安全存储中删除"); showFeedback("凭据已删除", "success");
+    } catch (reason) { operation.fail(reason); setError(String(reason)); showFeedback(String(reason), "error"); }
   }
 
   async function testConnection() {
     setSaving(true); setError(""); setMessage("");
+    const operation = startOperation("测试 AI 服务连接", ai.provider);
     try {
       await saveAiProviderSettings(ai);
       await saveCredential("ai_api_key");
       await testAiProvider();
-      setMessage("AI 服务连接测试通过"); showToast("AI 服务连接测试通过");
+      operation.succeed("连接测试通过");
+      setMessage("AI 服务连接测试通过"); showFeedback("AI 服务连接测试通过", "success");
     } catch (reason) {
-      setError(`连接测试失败：${String(reason)}`); showToast(`连接测试失败：${String(reason)}`, "error");
+      operation.fail(reason);
+      setError(`连接测试失败：${String(reason)}`); showFeedback(`连接测试失败：${String(reason)}`, "error");
     } finally { setSaving(false); }
   }
 
@@ -215,14 +235,28 @@ export default function SettingsPage() {
   }
 
   async function removeEmailAccount() {
+    const confirmed = await requestConfirmation({
+      title: "删除这个邮箱账户？",
+      message: "本机保存的邮箱密码或 OAuth2 授权也会一并删除。邮件原文不会受到影响。",
+      confirmLabel: "删除账户",
+      kind: "danger",
+    });
+    if (!confirmed) return;
     const remaining = email.accounts.filter((item) => item.id !== emailAccountId);
-    if (hasLocalDatabase) {
-      await Promise.all([deleteCredential(emailCredentialKey("email_password", emailAccountId)), deleteCredential(emailCredentialKey("email_oauth_refresh_token", emailAccountId))]);
+    try {
+      await trackOperation("删除邮箱账户", async () => {
+        if (hasLocalDatabase) {
+          await Promise.all([deleteCredential(emailCredentialKey("email_password", emailAccountId)), deleteCredential(emailCredentialKey("email_oauth_refresh_token", emailAccountId))]);
+        }
+      });
+      const next = remaining[0];
+      setEmail(next ? { ...email, accounts: remaining, ...emailEditor(next) } : { ...defaultProviderSettings.email, accounts: remaining, pollingMinutes: email.pollingMinutes, enabled: email.enabled });
+      setEmailAccountId(next?.id ?? "");
+      if (next) selectEmailAccount(next);
+      showFeedback("邮箱账户和本机授权已删除", "success");
+    } catch (reason) {
+      showFeedback(String(reason), "error");
     }
-    const next = remaining[0];
-    setEmail(next ? { ...email, accounts: remaining, ...emailEditor(next) } : { ...defaultProviderSettings.email, accounts: remaining, pollingMinutes: email.pollingMinutes, enabled: email.enabled });
-    setEmailAccountId(next?.id ?? "");
-    if (next) selectEmailAccount(next);
   }
 
   const navigation: Array<[Tab, typeof BrainCircuit, string]> = [
@@ -236,11 +270,9 @@ export default function SettingsPage() {
     <aside>{navigation.map(([value, Icon, label]) => <button type="button" className={tab === value ? "active" : ""} key={value} onClick={() => { setTab(value); setMessage(""); setError(""); }}><Icon size={17} />{label}</button>)}</aside>
     <div>
       {loading && <Card><div className="settings-notice">正在读取本地设置…</div></Card>}
-      {!loading && message && <div className="settings-notice" role="status">{message}</div>}
-      {!loading && error && <div className="detail-error" role="alert">{error}</div>}
-      {!loading && tab === "profile" && <StructuredResumeSettings onMessage={(value) => { setMessage(value); if (value) window.dispatchEvent(new Event("resume-profile-changed")); showToast(value); }} onError={(value) => { setError(value); showToast(value, "error"); }} />}
+      {!loading && tab === "profile" && <StructuredResumeSettings onMessage={(value) => { setMessage(value); if (value) window.dispatchEvent(new Event("resume-profile-changed")); showFeedback(value, "success"); }} onError={(value) => { setError(value); showFeedback(value, "error"); }} />}
       {!loading && tab === "ai" && <ProviderForm title="AI 服务" subtitle="连接 AI 服务，获取面试准备和复盘建议" onSubmit={submitAi} saving={saving}>
-        <ProviderPreset value={ai.provider} onChange={(provider) => { const preset = AI_PROVIDER_PRESETS.find((item) => item.name === provider); if (!preset) { setError("未知的 AI 服务厂商"); return; } setAi({ ...ai, provider: preset.name, protocol: preset.protocol, baseUrl: preset.baseUrl, model: preset.model, fallbackModel: preset.fallbackModel }); }} />
+        <ProviderPreset value={ai.provider} onChange={(provider) => { const preset = AI_PROVIDER_PRESETS.find((item) => item.name === provider); if (!preset) { setError("未知的 AI 服务厂商"); showFeedback("未知的 AI 服务厂商", "error"); return; } setAi({ ...ai, provider: preset.name, protocol: preset.protocol, baseUrl: preset.baseUrl, model: preset.model, fallbackModel: preset.fallbackModel }); }} />
         <Field label="接口地址" hint="已根据厂商预设填充，也可以手动修改"><input required type="url" value={ai.baseUrl} onChange={(e) => setAi({ ...ai, baseUrl: e.target.value })} /></Field>
         <div className="settings-form-grid"><Field label="主模型"><input required value={ai.model} onChange={(e) => setAi({ ...ai, model: e.target.value })} /></Field><Field label="备用模型" hint="可选"><input value={ai.fallbackModel ?? ""} onChange={(e) => setAi({ ...ai, fallbackModel: e.target.value })} /></Field></div>
         <CredentialField status={credentialStatus.ai_api_key} value={secret.ai_api_key} onChange={(value) => setSecret({ ...secret, ai_api_key: value })} onDelete={() => removeCredential("ai_api_key")} />
@@ -259,7 +291,7 @@ export default function SettingsPage() {
           {email.provider === "Outlook" && <Field label="Microsoft Tenant" hint="个人与多租户应用使用 common；组织可填写租户 ID"><input value={email.oauthTenant} onChange={(event) => setEmail({ ...email, oauthTenant: event.target.value })} /></Field>}
           <div className="settings-inline-action"><button type="button" className="button button--secondary" disabled={!hasLocalDatabase || saving || !email.oauthClientId.trim()} onClick={authorizeEmail}>{saving ? "等待浏览器授权…" : credentialStatus.email_oauth_refresh_token ? "重新授权 OAuth2" : "连接并授权 OAuth2"}</button>{credentialStatus.email_oauth_refresh_token && <button type="button" className="text-button danger-text" disabled={saving} onClick={() => removeCredential("email_oauth_refresh_token")}>移除本机授权</button>}<small>{credentialStatus.email_oauth_refresh_token ? "授权信息已保存，每次检查邮件时会自动续期。" : "将打开浏览器完成授权，授权后会自动返回应用。"}</small></div>
         </>}
-        {selectedEmailPreset?.credentialUrl && <div className="settings-inline-action"><a className="button button--secondary" href={selectedEmailPreset.credentialUrl} onClick={(event) => { event.preventDefault(); void openExternalUrl(selectedEmailPreset.credentialUrl).catch((reason) => showToast(String(reason), "error")); }}><ExternalLink size={15} />{selectedEmailPreset.credentialAction}</a><small>{selectedEmailPreset.credentialHint}</small></div>}
+        {selectedEmailPreset?.credentialUrl && <div className="settings-inline-action"><a className="button button--secondary" href={selectedEmailPreset.credentialUrl} onClick={(event) => { event.preventDefault(); void openExternalUrl(selectedEmailPreset.credentialUrl).catch((reason) => showFeedback(String(reason), "error")); }}><ExternalLink size={15} />{selectedEmailPreset.credentialAction}</a><small>{selectedEmailPreset.credentialHint}</small></div>}
         <div className="settings-form-grid"><Field label="检查间隔（分钟）"><input type="number" min="1" max="1440" value={email.pollingMinutes} onChange={(event) => setEmail({ ...email, pollingMinutes: Number(event.target.value) })} /></Field><span /></div>
         <Card className="privacy-card"><CardHeader title="连接行为" subtitle="放心设置，不会影响你的原邮件" /><Toggle checked={email.useTls} onChange={(useTls) => setEmail({ ...email, useTls, imapPort: useTls && email.imapPort === 143 ? 993 : email.imapPort })} label="使用 TLS 加密连接（远程服务器必须启用，防止凭据和邮件明文传输）" /><Toggle checked={email.accountEnabled ?? true} onChange={(accountEnabled) => setEmail({ ...email, accountEnabled })} label="启用当前邮箱收信" /><Toggle checked={email.enabled} onChange={(enabled) => setEmail({ ...email, enabled })} label="启用定时邮件检查（按上方间隔自动读取所有已启用邮箱）" /></Card>
       </ProviderForm>}
@@ -291,24 +323,27 @@ function UpdateSettings() {
   async function runCheck() {
     setChecking(true); setUpdate(null); setProgress(null); setStatus("正在检查更新…");
     try {
-      const result = await checkForUpdate();
+      const result = await trackOperation("检查软件更新", () => checkForUpdate());
       setUpdate(result);
       setStatus(result ? `发现新版本 v${result.version}` : "当前已是最新版本。");
-    } catch (reason) { setStatus(`检查失败：${String(reason)}`); }
+      showFeedback(result ? `发现新版本 v${result.version}` : "当前已是最新版本。", result ? "info" : "success");
+    } catch (reason) { setStatus(`检查失败：${String(reason)}`); showFeedback(String(reason), "error"); }
     finally { setChecking(false); }
   }
 
   async function install() {
     setInstalling(true); setStatus("正在准备下载更新…");
+    const operation = startOperation("下载并安装软件更新", update ? `v${update.version}` : undefined);
     let downloaded = 0;
     let total = 0;
     try {
       await downloadAndInstallUpdate((event) => {
-        if (event.event === "Started") { total = event.data.contentLength ?? 0; setProgress(0); setStatus("正在下载更新…"); }
-        if (event.event === "Progress") { downloaded += event.data.chunkLength; setProgress(total ? Math.min(100, Math.round(downloaded / total * 100)) : null); }
-        if (event.event === "Finished") { setProgress(100); setStatus("更新已下载，正在安装并重启…"); }
+        if (event.event === "Started") { total = event.data.contentLength ?? 0; setProgress(0); setStatus("正在下载更新…"); operation.update("正在下载更新…"); }
+        if (event.event === "Progress") { downloaded += event.data.chunkLength; const nextProgress = total ? Math.min(100, Math.round(downloaded / total * 100)) : null; setProgress(nextProgress); operation.update(nextProgress === null ? "正在下载更新…" : `下载进度 ${nextProgress}%`); }
+        if (event.event === "Finished") { setProgress(100); setStatus("更新已下载，正在安装并重启…"); operation.update("正在安装并准备重启"); }
       });
-    } catch (reason) { setStatus(`更新失败：${String(reason)}`); setInstalling(false); }
+      operation.succeed("更新已安装");
+    } catch (reason) { operation.fail(reason); setStatus(`更新失败：${String(reason)}`); showFeedback(String(reason), "error"); setInstalling(false); }
   }
 
   return <Card className="update-settings"><CardHeader title="软件更新" subtitle="通过 GitHub Releases 获取经过签名验证的更新" />
@@ -381,24 +416,26 @@ function DataSettings() {
   const [location, setLocation] = useState("");
   const [operation, setOperation] = useState<"move" | "backup" | "restore">();
   useEffect(() => { let disposed = false; if (hasLocalDatabase) getDataLocation().then((value) => { if (!disposed) setLocation(value); }).catch(() => undefined); return () => { disposed = true; }; }, []);
-  const choose = async () => { const directory = await openDialog({ directory: true, multiple: false, title: "选择数据保存目录" }); if (!directory || typeof directory !== "string") return; setOperation("move"); try { setLocation(await setDataLocation(directory)); showToast("已切换数据位置，原数据库保留为安全副本"); } catch (reason) { showToast(String(reason), "error"); } finally { setOperation(undefined); } };
+  const choose = async () => { const directory = await openDialog({ directory: true, multiple: false, title: "选择数据保存目录" }); if (!directory || typeof directory !== "string") return; setOperation("move"); try { setLocation(await trackOperation("移动应用数据", () => setDataLocation(directory), directory)); showFeedback("已切换数据位置，原数据库保留为安全副本", "success"); } catch (reason) { showFeedback(String(reason), "error"); } finally { setOperation(undefined); } };
   const backup = async () => {
     const date = new Date().toISOString().slice(0, 10);
     const path = await saveDialog({ title: "导出数据备份", defaultPath: `applied-yet-backup-${date}.sqlite3`, filters: [{ name: "投了吗数据库", extensions: ["sqlite3"] }] });
     if (!path) return;
     setOperation("backup");
-    try { await backupDatabase(path); showToast("数据备份已通过完整性检查并保存"); } catch (reason) { showToast(String(reason), "error"); } finally { setOperation(undefined); }
+    try { await trackOperation("备份应用数据", () => backupDatabase(path), "正在执行完整性检查并写入备份"); showFeedback("数据备份已通过完整性检查并保存", "success"); } catch (reason) { showFeedback(String(reason), "error"); } finally { setOperation(undefined); }
   };
   const restore = async () => {
     const path = await openDialog({ title: "选择数据备份", multiple: false, filters: [{ name: "投了吗数据库", extensions: ["sqlite3", "db"] }] });
     if (!path || typeof path !== "string") return;
-    if (!window.confirm("恢复后会立即切换到所选备份；当前数据库将原样保留，系统凭据不会改变。确定继续吗？")) return;
+    const confirmed = await requestConfirmation({ title: "恢复数据备份？", message: "恢复后会立即切换到所选备份；当前数据库将原样保留，系统凭据不会改变。", confirmLabel: "恢复并重新载入", kind: "warning" });
+    if (!confirmed) return;
     setOperation("restore");
     try {
-      await restoreDatabase(path);
-      window.alert("备份恢复成功，应用将重新载入。");
-      window.location.reload();
-    } catch (reason) { showToast(String(reason), "error"); setOperation(undefined); }
+      await trackOperation("恢复应用数据", () => restoreDatabase(path), "正在检查并切换数据库");
+      const reload = await requestConfirmation({ title: "备份恢复成功", message: "应用需要重新载入才能使用恢复后的数据。", confirmLabel: "立即重新载入", cancelLabel: "稍后", kind: "info" });
+      if (reload) window.location.reload();
+      else setOperation(undefined);
+    } catch (reason) { showFeedback(String(reason), "error"); setOperation(undefined); }
   };
   const busy = operation !== undefined;
   return <><Card><CardHeader title="数据与备份" /><div className="setting-block"><div><strong>数据保存位置</strong><p>{hasLocalDatabase ? location || "正在读取当前数据位置…" : "预览模式下展示的是示例数据，不会影响你的真实信息"}</p></div><button type="button" className="button button--secondary" disabled={!hasLocalDatabase || busy} onClick={choose}><FolderOpen size={16} />{operation === "move" ? "正在移动…" : "选择位置"}</button></div><div className="setting-block"><div><strong>导出数据备份</strong><p>生成一份完整的求职数据副本，方便你迁移或存档</p></div><button type="button" className="button button--secondary" disabled={!hasLocalDatabase || busy} onClick={backup}><Database size={16} />{operation === "backup" ? "正在备份…" : "导出备份"}</button></div><div className="setting-block"><div><strong>恢复数据备份</strong><p>从之前备份的文件恢复你的所有求职数据</p></div><button type="button" className="button button--secondary" disabled={!hasLocalDatabase || busy} onClick={restore}><RotateCcw size={16} />{operation === "restore" ? "正在恢复…" : "恢复备份"}</button></div></Card></>;

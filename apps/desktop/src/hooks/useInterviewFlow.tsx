@@ -42,7 +42,7 @@ import {
   updateProcessingJobText as persistProcessingJobText,
   type ProcessingJobSummary,
 } from "../services/ai";
-import { showToast } from "../services/toast";
+import { showFeedback } from "../services/feedback";
 export type { ExperienceLink } from "../services/experience";
 export type { InterviewQuestion, InterviewSession } from "../services/interviews";
 
@@ -203,13 +203,13 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
           const current = nextStates.get(job.id);
           if (!previous || previous === current) continue;
           if (job.status === "succeeded" && job.importStatus === "pending") {
-            showToast(`${job.kind === "asr" ? "音频转写" : "文档解析"}完成，可前往面试复盘检查文字`, "success", 5200);
+            showFeedback(`${job.kind === "asr" ? "音频转写" : "文档解析"}完成，可前往面试复盘检查文字`, "success", 5200);
           } else if (job.status === "failed") {
-            showToast(`${job.kind === "asr" ? "音频转写" : "文档解析"}失败：${job.errorMessage ?? "未知错误"}`, "error", 6000);
+            showFeedback(`${job.kind === "asr" ? "音频转写" : "文档解析"}失败：${job.errorMessage ?? "未知错误"}`, "error", 6000);
           } else if (job.importStatus === "succeeded") {
-            showToast("面试记录生成完成", "success", 5200);
+            showFeedback("面试记录生成完成", "success", 5200);
           } else if (job.importStatus === "failed") {
-            showToast(`面试记录生成失败：${job.importErrorMessage ?? "未知错误"}`, "error", 6000);
+            showFeedback(`面试记录生成失败：${job.importErrorMessage ?? "未知错误"}`, "error", 6000);
           }
         }
       }
@@ -516,11 +516,11 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
         const imported = await persistProcessingJobImport(jobId, confirmAiSend);
         knownProcessingStates.current = new Map(knownProcessingStates.current).set(jobId, "succeeded:succeeded");
         setSessions((current) => [imported, ...current.filter((item) => item.id !== imported.id)]);
-        showToast("面试记录生成完成");
+        showFeedback("面试记录生成完成", "success");
         return imported;
       } catch (error) {
         knownProcessingStates.current = new Map(knownProcessingStates.current).set(jobId, "succeeded:failed");
-        showToast(`面试记录生成失败：${String(error)}`, "error", 6000);
+        showFeedback(`面试记录生成失败：${String(error)}`, "error", 6000);
         throw error;
       } finally {
         setProcessingRequestCount((current) => Math.max(0, current - 1));
@@ -535,9 +535,9 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
           ? await parseDocument(path, applicationId)
           : await transcribeAudio(path, applicationId);
         knownProcessingStates.current = new Map(knownProcessingStates.current).set(result.id, `${result.status}:pending`);
-        showToast(kind === "document" ? "文档解析完成，请检查文字后生成面试记录" : "音频转写完成，请检查文字后生成面试记录", "success", 5200);
+        showFeedback(kind === "document" ? "文档解析完成，请检查文字后生成面试记录" : "音频转写完成，请检查文字后生成面试记录", "success", 5200);
       } catch (error) {
-        showToast(`${kind === "document" ? "文档解析" : "音频转写"}失败：${String(error)}`, "error", 6000);
+        showFeedback(`${kind === "document" ? "文档解析" : "音频转写"}失败：${String(error)}`, "error", 6000);
         throw error;
       } finally {
         setProcessingRequestCount((current) => Math.max(0, current - 1));
@@ -548,13 +548,13 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     updateProcessingJobText: async (jobId, text) => {
       await persistProcessingJobText(jobId, text);
       await refreshProcessingJobs();
-      showToast("面试文字已保存");
+      showFeedback("面试文字已保存", "success");
     },
     deleteProcessingJob: async (jobId) => {
       await persistProcessingJobDeletion(jobId);
       knownProcessingStates.current?.delete(jobId);
       await refreshProcessingJobs();
-      showToast("材料处理记录已删除");
+      showFeedback("材料处理记录已删除", "success");
     },
     deleteSession: async (id) => {
       if (hasLocalDatabase) await deleteInterviewSession(id);

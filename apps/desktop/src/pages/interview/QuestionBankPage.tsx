@@ -13,6 +13,8 @@ import {
   type SaveQuestionBankInput,
 } from "../../services/interviews";
 import { hasLocalDatabase } from "../../services/applications";
+import { showError, showSuccess } from "../../services/feedback";
+import { trackOperation } from "../../services/operations";
 
 const emptyDraft: SaveQuestionBankInput = {
   prompt: "",
@@ -91,6 +93,10 @@ export default function QuestionBankPage() {
     };
   }, [cursors, debouncedQuery, filter, pageIndex]);
 
+  useEffect(() => {
+    if (error) showError(error, "个人题库操作失败");
+  }, [error]);
+
   const refresh = () => {
     const requestId = ++listRequestId.current;
     setLoading(true);
@@ -149,16 +155,16 @@ export default function QuestionBankPage() {
     setError("");
     try {
       if (!editing && !allowSeparate) {
-        const matches = await listQuestionMatchCandidates(draft.prompt);
+        const matches = await trackOperation("检查题库相似问题", () => listQuestionMatchCandidates(draft.prompt));
         if (matches.length) {
           setCandidates(matches);
           return;
         }
       }
-      const saved = await saveQuestionBankItem(editing?.id, {
+      const saved = await trackOperation(editing ? "保存题库问题" : "添加题库问题", () => saveQuestionBankItem(editing?.id, {
         ...draft,
         forceNew: !editing && allowSeparate,
-      });
+      }), draft.prompt);
       if (!editing && allowSeparate && candidates[0]) {
         await resolveQuestionMatch(
           saved.id,
@@ -169,6 +175,7 @@ export default function QuestionBankPage() {
       }
       setEditing(undefined);
       refresh();
+      showSuccess(editing ? "问题与最佳回答已更新。" : "问题已加入个人题库。", editing ? "题库问题已保存" : "题库问题已添加");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -179,14 +186,15 @@ export default function QuestionBankPage() {
   const useExisting = async (item: QuestionBankItem) => {
     setSaving(true);
     try {
-      await saveQuestionBankItem(item.id, {
+      await trackOperation("更新已有题库问题", () => saveQuestionBankItem(item.id, {
         prompt: item.prompt,
         category: item.category,
         bestAnswer: item.bestAnswer,
         mastery: item.mastery,
-      });
+      }), item.prompt);
       setEditing(undefined);
       refresh();
+      showSuccess("已使用并更新已有问题。", "题库已更新");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -197,7 +205,7 @@ export default function QuestionBankPage() {
   const showDetail = async (item: QuestionBankItem) => {
     if (!hasLocalDatabase) return;
     try {
-      setDetail(await getQuestionBankItem(item.id));
+      setDetail(await trackOperation("读取题库问题详情", () => getQuestionBankItem(item.id), item.prompt));
     } catch (reason) {
       setError(String(reason));
     }
@@ -226,7 +234,6 @@ export default function QuestionBankPage() {
       </div>
     </div>
 
-    {error && editing === undefined && <p className="detail-error">{error}</p>}
 
     <Card className="table-card question-bank-table question-bank-table--simple">
       <table>

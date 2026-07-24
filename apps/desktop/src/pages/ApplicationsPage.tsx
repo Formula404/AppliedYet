@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Columns3, Download, Filter, GripVertical, LayoutList, MapPin, Plus, Search, Trash2, X } from "lucide-react";
+import { Columns3, Download, Filter, GripVertical, LayoutList, MapPin, Plus, Search, Trash2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { DndContext, pointerWithin, type DragEndEvent, useDraggable, useDroppable } from "@dnd-kit/core";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -9,6 +9,8 @@ import type { Application } from "../types";
 import { useInterviewFlow } from "../hooks/useInterviewFlow";
 import { exportApplicationsExcel, hasLocalDatabase } from "../services/applications";
 import { NewApplicationDialog } from "../components/NewApplicationDialog";
+import { requestConfirmation, showError, showFeedback, showSuccess } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 
 const columns = [
   { label: "已投递", match: ["投递"] },
@@ -99,7 +101,7 @@ function RejectedDroppable({ children }: { children: React.ReactNode }) {
 }
 
 export default function ApplicationsPage() {
-  const { applications: apps, applicationsLoading, applicationsError, archiveApplication, createApplication, deleteApplication, updateApplicationStage } = useInterviewFlow();
+  const { applications: apps, applicationsLoading, archiveApplication, createApplication, deleteApplication, updateApplicationStage } = useInterviewFlow();
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const [view, setView] = useState<"board" | "list">("board");
@@ -109,11 +111,8 @@ export default function ApplicationsPage() {
   const [exporting, setExporting] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [cityFilter, setCityFilter] = useState("all");
-  const [notice, setNotice] = useState<{ title: string; message: string; kind: "success" | "error" } | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Application | null>(null);
 
   useEffect(() => { setShowNew(params.get("new") === "1"); }, [params]);
-  useEffect(() => { if (applicationsError) setNotice({ title: "数据操作失败", message: applicationsError, kind: "error" }); }, [applicationsError]);
 
   const activeApps = useMemo(() => apps.filter((item) => !item.archived), [apps]);
   const archivedApps = useMemo(() => apps.filter((item) => item.archived), [apps]);
@@ -137,9 +136,13 @@ export default function ApplicationsPage() {
     const application = apps.find((item) => item.id === active.id);
     if (!application || application.stage === newStage) return;
     try {
-      await updateApplicationStage(application.id, newStage, (stageToneMap[newStage] || application.stageTone) as Application["stageTone"]);
+      await trackOperation("更新投递阶段", () => updateApplicationStage(
+        application.id,
+        newStage,
+        (stageToneMap[newStage] || application.stageTone) as Application["stageTone"],
+      ), `${application.company} · ${application.role}`);
     } catch (reason) {
-      setNotice({ title: "阶段更新失败", message: String(reason), kind: "error" });
+      showError(reason, "阶段更新失败");
     }
   };
 
@@ -149,16 +152,42 @@ export default function ApplicationsPage() {
       if (!hasLocalDatabase) throw new Error("浏览器预览模式不支持写入本地 Excel，请在桌面应用中使用导出功能。");
       const path = await save({ defaultPath: `投递记录-${new Date().toLocaleDateString("en-CA")}.xls`, filters: [{ name: "Excel 工作簿", extensions: ["xls"] }] });
       if (!path) return;
-      const count = await exportApplicationsExcel(path);
-      setNotice({ title: "导出完成", message: `已导出 ${count} 条投递及其全部流程、状态变更记录。\n${path}`, kind: "success" });
+      const count = await trackOperation("导出投递记录", () => exportApplicationsExcel(path), "正在生成 Excel 工作簿");
+      showFeedback({ title: "导出完成", message: `已导出 ${count} 条投递及其全部流程、状态变更记录。\n${path}`, kind: "success" });
     } catch (reason) {
-      setNotice({ title: "导出失败", message: String(reason), kind: "error" });
+      showError(reason, "导出失败");
     } finally {
       setExporting(false);
     }
   };
 
   const close = () => { setShowNew(false); setParams({}); };
+
+  const restoreApplication = async (application: Application) => {
+    try {
+      await trackOperation("恢复已归档投递", () => archiveApplication(application.id, false), `${application.company} · ${application.role}`);
+      showSuccess(`${application.company} · ${application.role} 已重新加入看板与统计。`, "投递已恢复");
+    } catch (reason) {
+      showError(reason, "恢复失败");
+    }
+  };
+
+  const removeArchivedApplication = async (application: Application) => {
+    const confirmed = await requestConfirmation({
+      title: "删除已归档投递？",
+      message: `“${application.company} · ${application.role}”将从归档列表、统计和导出中移除。此操作无法在界面中恢复。`,
+      confirmLabel: "确认删除",
+      cancelLabel: "取消",
+      kind: "danger",
+    });
+    if (!confirmed) return;
+    try {
+      await trackOperation("删除已归档投递", () => deleteApplication(application.id), `${application.company} · ${application.role}`);
+      showSuccess(`${application.company} · ${application.role} 已从已归档投递中删除。`, "投递已删除");
+    } catch (reason) {
+      showError(reason, "删除失败");
+    }
+  };
 
   return (
     <div className="page page-enter">
@@ -233,21 +262,19 @@ export default function ApplicationsPage() {
       )}
       {archivedApps.length > 0 && <Card className="archived-applications">
         <div className="archived-applications-head"><div><h3>已归档投递</h3><span>{archivedApps.length} 项</span></div><small>归档记录不参与首页统计和提醒</small></div>
-        <div>{archivedApps.map((app) => <div className="archived-application-row" key={app.id}><span className="company-logo">{app.companyMark}</span><button onClick={() => navigate(`/applications/${app.id}`)}><strong>{app.company}</strong><small>{app.role} · {app.city}</small></button><Badge tone="gray">{app.stage}</Badge><button type="button" className="button button--secondary" onClick={async () => { try { await archiveApplication(app.id, false); setNotice({ title: "投递已恢复", message: `${app.company} · ${app.role} 已重新加入看板与统计。`, kind: "success" }); } catch (reason) { setNotice({ title: "恢复失败", message: String(reason), kind: "error" }); } }}>恢复</button><button type="button" className="button button--secondary danger-text" onClick={() => setPendingDelete(app)}><Trash2 size={13}/>删除</button></div>)}</div>
+        <div>{archivedApps.map((app) => <div className="archived-application-row" key={app.id}><span className="company-logo">{app.companyMark}</span><button onClick={() => navigate(`/applications/${app.id}`)}><strong>{app.company}</strong><small>{app.role} · {app.city}</small></button><Badge tone="gray">{app.stage}</Badge><button type="button" className="button button--secondary" onClick={() => void restoreApplication(app)}>恢复</button><button type="button" className="button button--secondary danger-text" onClick={() => void removeArchivedApplication(app)}><Trash2 size={13}/>删除</button></div>)}</div>
       </Card>}
-      {showNew && <NewApplicationDialog saving={saving} onClose={close} onError={(reason) => setNotice({ title: "保存投递失败", message: String(reason), kind: "error" })} onSubmit={async (input) => {
+      {showNew && <NewApplicationDialog saving={saving} onClose={close} onError={(reason) => showError(reason, "保存投递失败")} onSubmit={async (input) => {
         setSaving(true);
         try {
-          const created = await createApplication(input);
+          const created = await trackOperation("保存新投递", () => createApplication(input), `${input.companyName} · ${input.positionTitle}`);
           close();
-          setNotice({ title: "投递已创建", message: "岗位资料已保存，创建事件已写入流程记录。", kind: "success" });
+          showSuccess("岗位资料已保存，创建事件已写入流程记录。", "投递已创建");
           return created;
         } finally {
           setSaving(false);
         }
       }} />}
-      {pendingDelete && <div className="modal-backdrop status-modal-backdrop" onMouseDown={() => setPendingDelete(null)}><div className="dialog status-dialog confirm-delete-dialog" role="alertdialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><span className="status-dialog-icon status-dialog-icon--danger"><Trash2 size={24}/></span><h2>删除已归档投递？</h2><p>“{pendingDelete.company} · {pendingDelete.role}”将从归档列表、统计和导出中移除。此操作无法在界面中恢复。</p><div className="confirm-dialog-actions"><button type="button" className="button button--secondary" onClick={() => setPendingDelete(null)}>取消</button><button type="button" className="button button--danger" onClick={async () => { const target = pendingDelete; try { await deleteApplication(target.id); setPendingDelete(null); setNotice({ title: "投递已删除", message: `${target.company} · ${target.role} 已从已归档投递中删除。`, kind: "success" }); } catch (reason) { setPendingDelete(null); setNotice({ title: "删除失败", message: String(reason), kind: "error" }); } }}><Trash2 size={14}/>确认删除</button></div></div></div>}
-      {notice && <div className="modal-backdrop status-modal-backdrop" onMouseDown={() => setNotice(null)}><div className={`dialog status-dialog status-dialog--${notice.kind}`} role="alertdialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><button type="button" className="status-dialog-close" onClick={() => setNotice(null)}><X size={18} /></button><span className="status-dialog-icon">{notice.kind === "success" ? <CheckCircle2 size={26} /> : <X size={24} />}</span><h2>{notice.title}</h2><p>{notice.message}</p><button type="button" className="button button--primary" onClick={() => setNotice(null)}>知道了</button></div></div>}
     </div>
   );
 }

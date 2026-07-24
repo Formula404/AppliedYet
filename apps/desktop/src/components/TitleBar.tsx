@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
+import { requestConfirmation, showError } from "../services/feedback";
 
 const win = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
   ? getCurrentWindow()
@@ -71,16 +71,17 @@ export default function TitleBar() {
         if (handlingClose) return;
         handlingClose = true;
         try {
-          const keepRunning = await ask("最小化到系统托盘后，邮件自动检查和任务提醒会继续在后台运行。", {
+          const exitApplication = await requestConfirmation({
             title: "关闭投了吗",
-            kind: "info",
-            okLabel: "最小化到托盘",
-            cancelLabel: "退出应用",
+            message: "退出应用后，邮件自动检查和任务提醒将停止；选择最小化到托盘可继续在后台运行。",
+            kind: "warning",
+            confirmLabel: "退出应用",
+            cancelLabel: "最小化到托盘",
           });
-          if (keepRunning) await win.hide();
-          else await exit(0);
+          if (exitApplication) await exit(0);
+          else await win.hide();
         } catch (error) {
-          console.error("处理窗口关闭失败", error);
+          showError(error, "处理窗口关闭失败");
         } finally {
           handlingClose = false;
         }
@@ -91,7 +92,7 @@ export default function TitleBar() {
 
       setMaximized(initialMaximized);
       setFocused(initialFocused);
-    })().catch((error) => console.error("无法初始化窗口控制", error));
+    })().catch((error) => showError(error, "无法初始化窗口控制"));
 
     return () => {
       disposed = true;
@@ -107,7 +108,7 @@ export default function TitleBar() {
       await win.toggleMaximize();
       await syncMaximizedState();
     } catch (error) {
-      console.error("窗口最大化/还原失败", error);
+      showError(error, "窗口最大化/还原失败");
     } finally {
       setChangingWindowState(false);
     }
@@ -120,7 +121,7 @@ export default function TitleBar() {
       handleToggleMaximize();
       return;
     }
-    void win.startDragging().catch((error) => console.error("窗口拖动失败", error));
+    void win.startDragging().catch((error) => showError(error, "窗口拖动失败"));
   };
 
   return (
@@ -130,13 +131,13 @@ export default function TitleBar() {
         <span className="titlebar-subtitle">Applied Yet?</span>
       </div>
       <div className="titlebar-controls">
-        <button type="button" className="tb-btn" onClick={() => { void win?.minimize().catch((error) => console.error("窗口最小化失败", error)); }} aria-label="最小化" title="最小化" disabled={!win}>
+        <button type="button" className="tb-btn" onClick={() => { void win?.minimize().catch((error) => showError(error, "窗口最小化失败")); }} aria-label="最小化" title="最小化" disabled={!win}>
           <MinusIcon />
         </button>
         <button type="button" className="tb-btn" onClick={handleToggleMaximize} disabled={!win || changingWindowState} aria-label={maximized ? "还原" : "最大化"} title={maximized ? "还原" : "最大化"}>
           {maximized ? <RestoreIcon /> : <MaximizeIcon />}
         </button>
-        <button type="button" className="tb-btn tb-close" onClick={() => { void win?.close().catch((error) => console.error("窗口关闭失败", error)); }} aria-label="关闭" title="关闭" disabled={!win}>
+        <button type="button" className="tb-btn tb-close" onClick={() => { void win?.close().catch((error) => showError(error, "窗口关闭失败")); }} aria-label="关闭" title="关闭" disabled={!win}>
           <CloseIcon />
         </button>
       </div>

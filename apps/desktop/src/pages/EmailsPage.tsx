@@ -4,7 +4,8 @@ import { Badge, Card, PageHeader } from "../components/ui";
 import { NewApplicationDialog } from "../components/NewApplicationDialog";
 import { hasLocalDatabase } from "../services/applications";
 import { attachEmailToApplication, confirmEmailMatch, createApplicationFromEmail, createEmailCalendarTask, getEmailStats, ignoreEmail, listEmailMessages, rematchEmail, reviewEmail, syncEmails, type EmailStats, type RecruitmentEmail } from "../services/emails";
-import { showToast } from "../services/toast";
+import { showFeedback } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 import { openExternalUrl } from "../services/external";
 import { useInterviewFlow } from "../hooks/useInterviewFlow";
 
@@ -32,7 +33,7 @@ export default function EmailsPage() {
       const [items, nextStats] = await Promise.all([listEmailMessages(), getEmailStats()]);
       setMessages(items); setStats(nextStats);
       setSelectedId((current) => items.some((item) => item.id === current) ? current : items[0]?.id ?? "");
-    } catch (reason) { showToast(String(reason), "error"); }
+    } catch (reason) { showFeedback(String(reason), "error"); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void load(); }, [load]);
@@ -47,16 +48,22 @@ export default function EmailsPage() {
     if (syncing) return;
     setSyncing(true);
     try {
-      const result = await syncEmails(); await load();
+      const result = await trackOperation("检查招聘邮件", async (operation) => {
+        operation.update("正在连接邮箱并识别招聘流程");
+        const syncResult = await syncEmails();
+        operation.update("正在刷新邮件索引");
+        await load();
+        return syncResult;
+      });
       window.dispatchEvent(new Event("email-index-changed"));
       const failed = result.accounts.filter((account) => account.status === "failed");
-      showToast(
+      showFeedback(
         failed.length
           ? `已完成 ${result.successCount} 个邮箱的检查，${result.failedCount} 个失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`
           : `检查完成：读取 ${result.fetched} 封邮件，识别 ${result.recognized} 封，匹配 ${result.matched} 封`,
         failed.length ? "error" : "success",
       );
-    } catch (reason) { await load(); window.dispatchEvent(new Event("email-index-changed")); showToast(`邮件检查失败：${String(reason)}`, "error"); }
+    } catch (reason) { await load(); window.dispatchEvent(new Event("email-index-changed")); showFeedback(`邮件检查失败：${String(reason)}`, "error"); }
     finally { setSyncing(false); }
   }
 
@@ -64,13 +71,13 @@ export default function EmailsPage() {
     if (!selected || busy) return;
     setBusy(true);
     try {
-      await reviewEmail(selected.id, applicationId, category, suggestedStage);
+      await trackOperation("保存邮件人工判断", () => reviewEmail(selected.id, applicationId, category, suggestedStage), selected.subject);
       setReviewing(false);
       await load();
       window.dispatchEvent(new Event("email-index-changed"));
-      showToast("已按你的选择更新关联、分类和建议阶段");
+      showFeedback("已按你的选择更新关联、分类和建议阶段", "success");
     } catch (reason) {
-      showToast(String(reason), "error");
+      showFeedback(String(reason), "error");
     } finally {
       setBusy(false);
     }
@@ -81,12 +88,12 @@ export default function EmailsPage() {
     setBusy(true);
     try {
       const remindAt = new Date(detectedSchedule.scheduledAt.getTime() - 30 * 60_000).toISOString();
-      await createEmailCalendarTask(selected.id, detectedSchedule.title, detectedSchedule.scheduledAt.toISOString(), remindAt);
+      await trackOperation("创建日历任务", () => createEmailCalendarTask(selected.id, detectedSchedule.title, detectedSchedule.scheduledAt.toISOString(), remindAt), detectedSchedule.title);
       await load();
       window.dispatchEvent(new Event("application-index-changed"));
-      showToast("已创建日历任务，并设置提前 30 分钟提醒");
+      showFeedback("已创建日历任务，并设置提前 30 分钟提醒", "success");
     } catch (reason) {
-      showToast(String(reason), "error");
+      showFeedback(String(reason), "error");
     } finally {
       setBusy(false);
     }
@@ -95,14 +102,20 @@ export default function EmailsPage() {
   async function act(action: "confirm" | "ignore" | "rematch") {
     if (!selected || busy) return; setBusy(true);
     try {
-      if (action === "confirm") await confirmEmailMatch(selected.id);
-      if (action === "ignore") await ignoreEmail(selected.id);
-      if (action === "rematch") await rematchEmail(selected.id);
+      await trackOperation(
+        action === "confirm" ? "确认招聘邮件" : action === "ignore" ? "忽略招聘邮件" : "重新匹配招聘邮件",
+        async () => {
+          if (action === "confirm") await confirmEmailMatch(selected.id);
+          if (action === "ignore") await ignoreEmail(selected.id);
+          if (action === "rematch") await rematchEmail(selected.id);
+        },
+        selected.subject,
+      );
       await load();
       window.dispatchEvent(new Event("email-index-changed"));
       if (action === "confirm") window.dispatchEvent(new Event("application-index-changed"));
-      showToast(action === "confirm" ? "已写入投递时间线并安全更新阶段" : action === "ignore" ? "已忽略该邮件" : "已重新识别邮件阶段并匹配当前投递");
-    } catch (reason) { showToast(String(reason), "error"); }
+      showFeedback(action === "confirm" ? "已写入投递时间线并安全更新阶段" : action === "ignore" ? "已忽略该邮件" : "已重新识别邮件阶段并匹配当前投递", "success");
+    } catch (reason) { showFeedback(String(reason), "error"); }
     finally { setBusy(false); }
   }
 
@@ -112,7 +125,7 @@ export default function EmailsPage() {
       {loading && <div className="settings-notice">正在读取本地邮件索引…</div>}
       {!loading && !filtered.length && <div className="email-empty"><Mail size={34}/><strong>暂无符合条件的招聘邮件</strong><small>{hasLocalDatabase ? "点击“立即检查”读取新邮件" : "当前为预览模式，展示的是示例数据"}</small></div>}
       {filtered.map((mail) => <button className={`email-item ${selectedId === mail.id ? "selected" : ""}`} key={mail.id} onClick={() => setSelectedId(mail.id)}><span className="company-logo">{mail.company?.[0] ?? "邮"}</span><span><span><strong>{mail.company ?? senderName(mail.sender)}</strong><time>{formatTime(mail.receivedAt)}</time></span><b>{mail.subject}</b><small>{mail.snippet || "邮件没有可显示的纯文本正文"}</small><span><Badge tone={mail.status === "confirmed" ? "green" : mail.status === "pending" ? "orange" : "gray"}>{statusLabel[mail.status]}</Badge><em>{mail.matchedApplicationId ? isManualMatch(mail) ? "人工关联" : `匹配分 ${mail.confidence}` : "等待匹配"}</em></span></span></button>)}</Card>
-      <Card className="email-detail">{selected ? <><div className="detail-head"><div><Badge tone={selected.status === "confirmed" ? "green" : "blue"}>{selected.category}</Badge><h2>{selected.subject}</h2><p>{selected.sender} · {formatTime(selected.receivedAt)}</p></div></div><div className={`mail-body ${expanded ? "is-expanded" : ""}`}><div className="mail-body-content">{linkifyText(expanded ? selected.bodyText : selected.snippet || "邮件没有可显示的纯文本正文。")}</div>{expanded && selected.links.length > 0 && <div className="mail-link-list"><strong>邮件中的链接</strong>{selected.links.map((link, index) => <a key={link.url} href={link.url} onClick={(event) => { event.preventDefault(); void openExternalUrl(link.url).catch((reason) => showToast(String(reason), "error")); }}><ExternalLink size={13}/><span>{link.label || `邮件链接 ${index + 1}`}</span><small>{link.url}</small></a>)}</div>}<button type="button" className="mail-expand-button" onClick={() => setExpanded((value) => !value)}>{expanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>} {expanded ? "收起邮件全文" : "展开邮件全文"}</button></div>
+      <Card className="email-detail">{selected ? <><div className="detail-head"><div><Badge tone={selected.status === "confirmed" ? "green" : "blue"}>{selected.category}</Badge><h2>{selected.subject}</h2><p>{selected.sender} · {formatTime(selected.receivedAt)}</p></div></div><div className={`mail-body ${expanded ? "is-expanded" : ""}`}><div className="mail-body-content">{linkifyText(expanded ? selected.bodyText : selected.snippet || "邮件没有可显示的纯文本正文。")}</div>{expanded && selected.links.length > 0 && <div className="mail-link-list"><strong>邮件中的链接</strong>{selected.links.map((link, index) => <a key={link.url} href={link.url} onClick={(event) => { event.preventDefault(); void openExternalUrl(link.url).catch((reason) => showFeedback(String(reason), "error")); }}><ExternalLink size={13}/><span>{link.label || `邮件链接 ${index + 1}`}</span><small>{link.url}</small></a>)}</div>}<button type="button" className="mail-expand-button" onClick={() => setExpanded((value) => !value)}>{expanded ? <ChevronUp size={14}/> : <ChevronDown size={14}/>} {expanded ? "收起邮件全文" : "展开邮件全文"}</button></div>
         <div className="match-analysis"><div className="analysis-title"><span><Link2 size={17}/>匹配分析</span><strong>{selected.matchedApplicationId ? isManualMatch(selected) ? "人工确认关联" : `匹配分 ${selected.confidence} · ${selected.confidence >= 90 ? "明确" : "需复核"}` : "存在歧义或尚未匹配"}</strong></div>
         {selected.matchedApplicationId ? <><div className="match-target"><span className="company-logo">{selected.company?.[0] ?? "投"}</span><span><strong>{selected.company} · {selected.role}</strong><small>当前阶段：{selected.currentStage ?? "未知"}</small></span><ChevronRight size={18}/></div><dl>{selected.reasons.map((reason, index) => <div key={reason}><dt>依据 {index + 1}</dt><dd>{reason}</dd></div>)}</dl></> : <div className="settings-notice">当前投递中没有足够接近的记录。你可以将邮件直接加入投递流程，或先完善已有投递后重新匹配。</div>}</div>
         {selected.suggestedStage && <div className="update-suggestion"><strong>建议更新</strong><p>按邮件接收时间新增“{selected.category}”事件，并以当时的历史阶段判断是否进入“{selected.suggestedStage}”；如果时间线上已有更晚节点，当前阶段会保留较新的状态。</p></div>}
@@ -132,13 +145,13 @@ export default function EmailsPage() {
         appliedAt: isApplicationReceipt(selected) ? inputDate(selected.receivedAt) : "",
         channel: "邮件识别",
       }}
-      onError={(reason) => showToast(`新增投递失败：${String(reason)}`, "error")}
+      onError={(reason) => showFeedback(`新增投递失败：${String(reason)}`, "error")}
       onSubmit={async (input) => {
         setBusy(true);
         try {
-          const application = hasLocalDatabase
-            ? await createApplicationFromEmail(selected.id, input)
-            : await createApplication(input);
+          const application = await trackOperation("从邮件创建投递", () => hasLocalDatabase
+            ? createApplicationFromEmail(selected.id, input)
+            : createApplication(input), `${input.companyName} · ${input.positionTitle}`);
           if (!hasLocalDatabase) {
             await attachEmailToApplication(selected.id, application.id);
             await confirmEmailMatch(selected.id);
@@ -147,7 +160,7 @@ export default function EmailsPage() {
           await load();
           window.dispatchEvent(new Event("email-index-changed"));
           window.dispatchEvent(new Event("application-index-changed"));
-          showToast(isApplicationReceipt(selected) ? "已加入“已投递”流程" : `已创建投递并写入“${selected.category}”阶段`);
+          showFeedback(isApplicationReceipt(selected) ? "已加入“已投递”流程" : `已创建投递并写入“${selected.category}”阶段`, "success");
           return application;
         } finally {
           setBusy(false);
@@ -257,7 +270,7 @@ function linkifyText(text: string) {
     const trailing = url.match(/[),.;!?，。；！？）】]+$/)?.[0] ?? "";
     if (trailing) url = url.slice(0, -trailing.length);
     if (start > offset) nodes.push(text.slice(offset, start));
-    nodes.push(<a key={`${start}-${url}`} href={url} onClick={(event) => { event.preventDefault(); void openExternalUrl(url).catch((reason) => showToast(String(reason), "error")); }}>{url}<ExternalLink size={11}/></a>);
+    nodes.push(<a key={`${start}-${url}`} href={url} onClick={(event) => { event.preventDefault(); void openExternalUrl(url).catch((reason) => showFeedback(String(reason), "error")); }}>{url}<ExternalLink size={11}/></a>);
     if (trailing) nodes.push(trailing);
     offset = start + match[0].length;
   }

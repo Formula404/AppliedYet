@@ -5,6 +5,8 @@ import { Card, CardHeader } from "../components/ui";
 import { hasLocalDatabase } from "../services/applications";
 import { createBlankResumeProfile, deleteResumeProfile, duplicateResumeProfile, importResumeProfile, listResumeProfiles, setPrimaryResumeProfile, setResumeProfileArchived, updateResumeProfile, type ResumeProfile, type UpdateResumeProfileInput } from "../services/resumes";
 import { getCredentialStatus, getProviderSettings } from "../services/settings";
+import { requestConfirmation } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 
 type Personal = { name: string; birthday: string; contact: string; links: string };
 type Education = { startDate: string; endDate: string; school: string; degree: string; major: string };
@@ -34,14 +36,20 @@ export default function StructuredResumeSettings({ onMessage, onError }: { onMes
   useEffect(() => { if (hasLocalDatabase) Promise.all([getProviderSettings(), getCredentialStatus("ai_api_key")]).then(([{ ai }, hasKey]) => { setAiConfigured(Boolean(ai.baseUrl && ai.model && hasKey)); setAllowAiResume(ai.allowResume); setPromptBeforeAiSend(ai.promptBeforeSend); }).catch(() => setAiConfigured(false)); }, []);
 
   const selected = profiles.find((item) => item.id === selectedId);
-  const createBlank = async () => { setBusy(true); onError(""); try { const created = await createBlankResumeProfile(`新建简历 · ${new Date().toLocaleDateString("zh-CN")}`); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(created.id); setDraft(toDraft(created)); onMessage("已创建空白简历，可直接填写结构化内容"); } catch (reason) { onError(String(reason)); } finally { setBusy(false); } };
+  const createBlank = async () => { setBusy(true); onError(""); try { const created = await trackOperation("创建空白简历", () => createBlankResumeProfile(`新建简历 · ${new Date().toLocaleDateString("zh-CN")}`)); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(created.id); setDraft(toDraft(created)); onMessage("已创建空白简历，可直接填写结构化内容"); } catch (reason) { onError(String(reason)); } finally { setBusy(false); } };
   const importFiles = async () => {
     const paths = await openDialog({ multiple: true, directory: false, filters: [{ name: "简历文件", extensions: ["pdf", "docx", "txt", "md"] }] });
     if (!paths || typeof paths === "string") return;
-    const confirmAiSend = aiConfigured && allowAiResume && (!promptBeforeAiSend || window.confirm(`将把选中的 ${paths.length} 份简历发送给 AI 服务进行信息提取。是否继续？\n\n选择”取消”仍会导入文件，但只做基础解析。`));
+    const confirmAiSend = aiConfigured && allowAiResume && (!promptBeforeAiSend || await requestConfirmation({
+      title: "使用 AI 提取简历信息？",
+      message: `将把选中的 ${paths.length} 份简历发送给 AI 服务进行信息提取。选择取消仍会导入文件，但只做基础解析。`,
+      confirmLabel: "发送并提取",
+      cancelLabel: "仅基础解析",
+      kind: "info",
+    }));
     setBusy(true); onError("");
     try {
-      const outcomes = await Promise.allSettled(paths.map((path) => importResumeProfile(path, confirmAiSend)));
+      const outcomes = await trackOperation("解析并导入简历", () => Promise.allSettled(paths.map((path) => importResumeProfile(path, confirmAiSend))), `${paths.length} 份简历文件`);
       const imported = outcomes.flatMap((outcome) => outcome.status === "fulfilled" ? [outcome.value] : []);
       const failures = outcomes.flatMap((outcome) => outcome.status === "rejected" ? [String(outcome.reason)] : []);
       const items = await listResumeProfiles(); setProfiles(items);
@@ -59,12 +67,12 @@ export default function StructuredResumeSettings({ onMessage, onError }: { onMes
   const save = async () => {
     if (!draft || !selectedId) return;
     setBusy(true); onError("");
-    try { const updated = await updateResumeProfile(selectedId, serializeDraft(draft)); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(updated.id); setDraft(toDraft(updated)); onMessage(selected?.linkedApplicationCount ? `简历已更新，${selected.linkedApplicationCount} 个关联投递将使用最新内容` : "简历已保存"); } catch (reason) { onError(String(reason)); } finally { setBusy(false); }
+    try { const updated = await trackOperation("保存简历", () => updateResumeProfile(selectedId, serializeDraft(draft)), draft.name); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(updated.id); setDraft(toDraft(updated)); onMessage(selected?.linkedApplicationCount ? `简历已更新，${selected.linkedApplicationCount} 个关联投递将使用最新内容` : "简历已保存"); } catch (reason) { onError(String(reason)); } finally { setBusy(false); }
   };
-  const makePrimary = async () => { if (!selectedId) return; try { await setPrimaryResumeProfile(selectedId); setProfiles((items) => items.map((item) => ({ ...item, isPrimary: item.id === selectedId }))); onMessage("已设为默认简历"); } catch (reason) { onError(String(reason)); } };
-  const remove = async () => { if (!selectedId || !selected) return; const linked = selected.linkedApplicationCount > 0; if (!window.confirm(linked ? `这份简历关联了 ${selected.linkedApplicationCount} 个投递。删除后会解除这些关联，确定继续吗？` : "确定永久删除这份简历吗？")) return; try { await deleteResumeProfile(selectedId); const items = await listResumeProfiles(); setProfiles(items); const next = items.find((item) => !item.archivedAt) ?? items[0]; setSelectedId(next?.id ?? ""); setDraft(next ? toDraft(next) : undefined); onMessage(linked ? "简历已删除，相关投递已解除关联" : "简历已删除"); } catch (reason) { onError(String(reason)); } };
-  const duplicate = async () => { if (!selectedId) return; try { const copy = await duplicateResumeProfile(selectedId); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(copy.id); setDraft(toDraft(copy)); onMessage("已复制为独立简历版本"); } catch (reason) { onError(String(reason)); } };
-  const toggleArchived = async () => { if (!selected) return; try { await setResumeProfileArchived(selected.id, !selected.archivedAt); const items = await listResumeProfiles(); setProfiles(items); const updated = items.find((item) => item.id === selected.id); if (updated) setDraft(toDraft(updated)); onMessage(selected.archivedAt ? "简历已恢复" : "简历已归档"); } catch (reason) { onError(String(reason)); } };
+  const makePrimary = async () => { if (!selectedId) return; try { await trackOperation("设置默认简历", () => setPrimaryResumeProfile(selectedId), selected?.name); setProfiles((items) => items.map((item) => ({ ...item, isPrimary: item.id === selectedId }))); onMessage("已设为默认简历"); } catch (reason) { onError(String(reason)); } };
+  const remove = async () => { if (!selectedId || !selected) return; const linked = selected.linkedApplicationCount > 0; const confirmed = await requestConfirmation({ title: "永久删除这份简历？", message: linked ? `这份简历关联了 ${selected.linkedApplicationCount} 个投递。删除后会解除这些关联。` : "删除后无法从应用界面恢复。", confirmLabel: "确认删除", kind: "danger" }); if (!confirmed) return; try { await trackOperation("删除简历", () => deleteResumeProfile(selectedId), selected.name); const items = await listResumeProfiles(); setProfiles(items); const next = items.find((item) => !item.archivedAt) ?? items[0]; setSelectedId(next?.id ?? ""); setDraft(next ? toDraft(next) : undefined); onMessage(linked ? "简历已删除，相关投递已解除关联" : "简历已删除"); } catch (reason) { onError(String(reason)); } };
+  const duplicate = async () => { if (!selectedId) return; try { const copy = await trackOperation("复制简历版本", () => duplicateResumeProfile(selectedId), selected?.name); const items = await listResumeProfiles(); setProfiles(items); setSelectedId(copy.id); setDraft(toDraft(copy)); onMessage("已复制为独立简历版本"); } catch (reason) { onError(String(reason)); } };
+  const toggleArchived = async () => { if (!selected) return; try { await trackOperation(selected.archivedAt ? "恢复简历" : "归档简历", () => setResumeProfileArchived(selected.id, !selected.archivedAt), selected.name); const items = await listResumeProfiles(); setProfiles(items); const updated = items.find((item) => item.id === selected.id); if (updated) setDraft(toDraft(updated)); onMessage(selected.archivedAt ? "简历已恢复" : "简历已归档"); } catch (reason) { onError(String(reason)); } };
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((current) => current ? ({ ...current, [key]: value }) : current);
 
   return <div className="resume-page">

@@ -15,6 +15,8 @@ import {
 import type { ApplicationDetail, ApplicationEvent, ApplicationTask, StatusTone } from "../types";
 import { listResumeProfiles, type ResumeProfile } from "../services/resumes";
 import { openExternalUrl } from "../services/external";
+import { requestConfirmation, showError, showSuccess } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 
 const stages = ["准备投递", "已投递", "在线测评", "笔试", "AI 面试", "HR 面试", "业务面试", "专业面试", "终面", "谈薪", "等待结果", "已获Offer", "进入人才库", "流程暂停", "流程结束", "主动放弃", "已拒绝"];
 const optional = (value: FormDataEntryValue | null) => String(value || "").trim() || undefined;
@@ -127,6 +129,7 @@ export default function ApplicationDetailPage() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => () => { loadRequest.current += 1; }, []);
   useEffect(() => { listResumeProfiles().then(setResumes).catch((reason) => setError(String(reason))); }, []);
+  useEffect(() => { if (error && !loading) showError(error, "投递详情操作失败"); }, [error, loading]);
 
   const saveDetail = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -145,7 +148,7 @@ export default function ApplicationDetailPage() {
     setError("");
     try {
       if (hasLocalDatabase) {
-        setDetail(await updateApplicationDetail(id, input));
+        setDetail(await trackOperation("保存投递详情", () => updateApplicationDetail(id, input), `${input.companyName} · ${input.positionTitle}`));
         await refreshApplications();
       } else {
         const changed = detail.currentStage !== input.currentStage;
@@ -157,6 +160,7 @@ export default function ApplicationDetailPage() {
         }, ...detail.events] });
       }
       setEditing(false);
+      showSuccess("岗位、投递与简历关联信息已更新。", "投递详情已保存");
     } catch (reason) { setError(String(reason)); } finally { setSaving(false); }
   };
 
@@ -178,7 +182,7 @@ export default function ApplicationDetailPage() {
     setSaving(true);
     try {
       if (hasLocalDatabase) {
-        await createApplicationTask(id, input);
+        await trackOperation("创建投递任务", () => createApplicationTask(id, input), input.title);
         await load();
       } else {
         const task: ApplicationTask = { id: `task-${Date.now()}`, ...input, status: "todo", sourceType: "manual", createdAt: new Date().toISOString() };
@@ -186,7 +190,8 @@ export default function ApplicationDetailPage() {
         setDetail({ ...detail, tasks: [task, ...detail.tasks], events: [timeline, ...detail.events] });
       }
       setAddingTask(false);
-    } catch (reason) { setTaskError(String(reason)); } finally { setSaving(false); }
+      showSuccess("新任务已加入当前投递。", "任务已创建");
+    } catch (reason) { showError(reason, "任务创建失败"); } finally { setSaving(false); }
   };
 
   const toggleTask = async (task: ApplicationTask) => {
@@ -194,11 +199,12 @@ export default function ApplicationDetailPage() {
     const status = task.status === "done" ? "todo" : "done";
     try {
       if (hasLocalDatabase) {
-        await setApplicationTaskStatus(task.id, status);
+        await trackOperation(status === "done" ? "完成投递任务" : "重新打开投递任务", () => setApplicationTaskStatus(task.id, status), task.title);
         await load();
       } else {
         setDetail({ ...detail, tasks: detail.tasks.map((item) => item.id === task.id ? { ...item, status, completedAt: status === "done" ? new Date().toISOString() : undefined } : item) });
       }
+      showSuccess(status === "done" ? "任务已标记为完成。" : "任务已重新打开。", "任务状态已更新");
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -221,34 +227,42 @@ export default function ApplicationDetailPage() {
     setSaving(true);
     try {
       if (hasLocalDatabase) {
-        await updateApplicationTask(editingTask.id, input);
+        await trackOperation("保存投递任务", () => updateApplicationTask(editingTask.id, input), input.title);
         await load();
       } else {
         setDetail((current) => current ? { ...current, tasks: current.tasks.map((task) => task.id === editingTask.id ? { ...task, ...input } : task) } : current);
       }
       setEditingTask(null);
-    } catch (reason) { setTaskError(String(reason)); } finally { setSaving(false); }
+      showSuccess("任务内容与提醒设置已更新。", "任务已保存");
+    } catch (reason) { showError(reason, "任务保存失败"); } finally { setSaving(false); }
   };
 
   const removeTask = async (task: ApplicationTask) => {
-    if (!window.confirm(`确定删除任务“${task.title}”吗？`)) return;
+    const confirmed = await requestConfirmation({ title: "删除任务？", message: `“${task.title}”将从当前投递中移除。`, confirmLabel: "确认删除", kind: "danger" });
+    if (!confirmed) return;
     try {
       if (hasLocalDatabase) {
-        await deleteApplicationTask(task.id);
+        await trackOperation("删除投递任务", () => deleteApplicationTask(task.id), task.title);
         await load();
       } else {
         setDetail((current) => current ? { ...current, tasks: current.tasks.filter((item) => item.id !== task.id) } : current);
       }
+      showSuccess("任务已从当前投递中删除。", "删除完成");
     } catch (reason) { setError(String(reason)); }
   };
 
   const toggleArchived = async () => {
     const archived = !detail?.archivedAt;
-    if (!detail || (archived && !window.confirm("归档后该投递将退出看板、首页统计和任务提醒。确定继续吗？"))) return;
+    if (!detail) return;
+    if (archived) {
+      const confirmed = await requestConfirmation({ title: "归档这条投递？", message: "归档后该投递将退出看板、首页统计和任务提醒。", confirmLabel: "确认归档", kind: "warning" });
+      if (!confirmed) return;
+    }
     try {
-      await archiveApplication(id, archived);
+      await trackOperation(archived ? "归档投递" : "恢复投递", () => archiveApplication(id, archived), `${detail.companyName} · ${detail.positionTitle}`);
       if (hasLocalDatabase) await load();
       else setDetail({ ...detail, archivedAt: archived ? new Date().toISOString() : undefined });
+      showSuccess(archived ? "投递已归档，不再参与统计与提醒。" : "投递已恢复到看板、统计与提醒。", archived ? "投递已归档" : "投递已恢复");
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -257,9 +271,10 @@ export default function ApplicationDetailPage() {
     setChangingStage(true);
     setError("");
     try {
-      await updateApplicationStage(id, stage, stageTone(stage));
+      await trackOperation("更新投递阶段", () => updateApplicationStage(id, stage, stageTone(stage)), `${detail.currentStage} → ${stage}`);
       if (hasLocalDatabase) await load();
       else setDetail({ ...detail, currentStage: stage, updatedAt: new Date().toISOString() });
+      showSuccess(`当前阶段已更新为“${stage}”。`, "投递阶段已更新");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -269,18 +284,24 @@ export default function ApplicationDetailPage() {
 
   const undoEvent = async (item: ApplicationEvent) => {
     const fromEmail = item.sourceType === "email";
-    if (!window.confirm(`撤销“${item.stageBefore} → ${item.stageAfter}”这次阶段变更吗？${fromEmail ? "\n对应邮件会恢复为待处理状态。" : ""}`)) return;
+    const confirmed = await requestConfirmation({ title: "撤销阶段变更？", message: `将撤销“${item.stageBefore} → ${item.stageAfter}”这次阶段变更。${fromEmail ? "对应邮件会恢复为待处理状态。" : ""}`, confirmLabel: "确认撤销", kind: "warning" });
+    if (!confirmed) return;
     const scrollPosition = window.scrollY;
     try {
       if (hasLocalDatabase) {
-        setDetail(await revertApplicationEvent(item.id));
+        setDetail(await trackOperation("撤销投递阶段变更", () => revertApplicationEvent(item.id), `${item.stageAfter} → ${item.stageBefore}`));
         await refreshApplications();
         if (fromEmail) window.dispatchEvent(new Event("email-index-changed"));
       } else if (detail && item.stageBefore) {
         setDetail({ ...detail, currentStage: item.stageBefore, events: detail.events.map((event) => event.id === item.id ? { ...event, revertedAt: new Date().toISOString() } : event) });
       }
       requestAnimationFrame(() => window.scrollTo({ top: scrollPosition, behavior: "instant" }));
-      if (fromEmail && window.confirm("已撤销该邮件造成的流程变更。是否现在重新选择关联岗位或阶段？")) navigate("/emails");
+      if (fromEmail) {
+        const openEmails = await requestConfirmation({ title: "阶段变更已撤销", message: "对应邮件已恢复为待处理状态。是否现在重新选择关联岗位或阶段？", confirmLabel: "前往招聘邮件", cancelLabel: "留在当前页面", kind: "info" });
+        if (openEmails) navigate("/emails");
+      } else {
+        showSuccess("阶段变更已撤销。", "撤销完成");
+      }
     } catch (reason) { setError(String(reason)); }
   };
 
@@ -292,13 +313,14 @@ export default function ApplicationDetailPage() {
     setSaving(true);
     try {
       if (hasLocalDatabase) {
-        await createApplicationEvent(id, input);
+        await trackOperation("添加投递事件", () => createApplicationEvent(id, input), input.title);
         await load();
       } else {
         const item: ApplicationEvent = { id: `event-${Date.now()}`, eventType: "manual_note", title: input.title, content: input.content, sourceType: "manual", happenedAt: input.happenedAt || new Date().toISOString(), reversible: false };
         setDetail({ ...detail, events: [item, ...detail.events] });
       }
       setAddingEvent(false);
+      showSuccess("事件已加入投递时间线。", "事件已添加");
     } catch (reason) { setError(String(reason)); } finally { setSaving(false); }
   };
 
@@ -312,12 +334,13 @@ export default function ApplicationDetailPage() {
     setEventError("");
     try {
       if (hasLocalDatabase) {
-        setDetail(await updateApplicationEventTime(editingEventTime.id, happenedAt));
+        setDetail(await trackOperation("修改事件时间", () => updateApplicationEventTime(editingEventTime.id, happenedAt), editingEventTime.title));
       } else {
         setDetail({ ...detail, events: detail.events.map((item) => item.id === editingEventTime.id ? { ...item, happenedAt, updatedAt: new Date().toISOString() } : item) });
       }
       setEditingEventTime(null);
-    } catch (reason) { setEventError(String(reason)); } finally { setSaving(false); }
+      showSuccess("事件时间已更新。");
+    } catch (reason) { showError(reason, "事件时间更新失败"); } finally { setSaving(false); }
   };
 
   if (loading) return <div className="page page-enter"><div className="detail-loading">正在读取岗位详情…</div></div>;
@@ -332,7 +355,6 @@ export default function ApplicationDetailPage() {
       <div><div className="detail-title-line"><h1>{detail.companyName} · {detail.positionTitle}</h1><Badge tone={stageTone(detail.currentStage)}>{detail.currentStage}</Badge><select className="detail-stage-select" aria-label="更新投递阶段" value={detail.currentStage} disabled={changingStage || Boolean(detail.archivedAt)} onChange={(event) => void changeStage(event.target.value)}>{!stages.includes(detail.currentStage) && <option>{detail.currentStage}</option>}{stages.map((stage) => <option key={stage}>{stage}</option>)}</select></div><p><MapPin size={14} />{detail.location || "地点未填写"}<span>·</span>{detail.department || "部门未填写"}<span>·</span>{priorityText(detail.priority)}优先级</p></div>
       <div className="detail-header-actions"><button className="button button--secondary" onClick={toggleArchived}>{detail.archivedAt ? <RotateCcw size={15} /> : <Archive size={15} />}{detail.archivedAt ? "恢复投递" : "归档投递"}</button><button className="button button--primary" onClick={() => setEditing(true)}><Pencil size={15} />编辑资料</button></div>
     </div>
-    {error && <div className="detail-error">{error}</div>}
 
     <div className="application-detail-grid">
       <div className="application-detail-main">

@@ -1,17 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertCircle, BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, Clock3, Download, FileCheck2, Inbox, Info, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun, X } from "lucide-react";
+import { BarChart3, Bell, BookOpenCheck, BriefcaseBusiness, CalendarDays, Check, ChevronDown, CircleDollarSign, Clock3, FileCheck2, Inbox, Menu, Mic2, Monitor, Moon, Plus, Search, Settings, Sparkles, Sun } from "lucide-react";
+import gsap from "gsap";
+import { useGSAP } from "@gsap/react";
 import TitleBar from "./TitleBar";
+import FeedbackCenter from "./FeedbackCenter";
+import OperationCenter from "./OperationCenter";
 import { useTheme } from "../hooks/useTheme";
 import { useInterviewFlow } from "../hooks/useInterviewFlow";
 import { startTaskNotificationScheduler } from "../services/notifications";
-import { subscribeToast, type ToastPayload } from "../services/toast";
+import { requestConfirmation, showError, showFeedback } from "../services/feedback";
+import { trackOperation } from "../services/operations";
 import { hasLocalDatabase } from "../services/applications";
 import { listResumeProfiles } from "../services/resumes";
 import { getActivitySummary, getDashboard, type ActivitySummary, type DashboardTask } from "../services/dashboard";
 import { getEmailStats, listEmailMessages, syncEmails, type RecruitmentEmail } from "../services/emails";
 import { getProviderSettings } from "../services/settings";
-import { checkForUpdate, type AvailableUpdate } from "../services/updates";
+import { checkForUpdate } from "../services/updates";
+
+gsap.registerPlugin(useGSAP);
 
 const nav = [
   ["/", "日历", CalendarDays], ["/applications", "我的投递", BriefcaseBusiness], ["/emails", "招聘邮件", Inbox],
@@ -31,13 +38,12 @@ const surnameFromName = (name: string) => {
 };
 
 export default function AppShell() {
+  const shellRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [syncing, setSyncing] = useState(false);
-  const [toast, setToast] = useState("");
-  const [toastKind, setToastKind] = useState<"success" | "error" | "info">("success");
-  const [globalToast, setGlobalToast] = useState<ToastPayload | null>(null);
   const [brandImageFailed, setBrandImageFailed] = useState(false);
   const [currentDate, setCurrentDate] = useState(() => new Date());
   const [surname, setSurname] = useState("");
@@ -45,17 +51,21 @@ export default function AppShell() {
   const [emailMessages, setEmailMessages] = useState<RecruitmentEmail[]>([]);
   const [emailPending, setEmailPending] = useState(0);
   const [notificationOpen, setNotificationOpen] = useState(false);
-  const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [notificationTasks, setNotificationTasks] = useState<DashboardTask[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
   const notificationRef = useRef<HTMLDivElement>(null);
   const notificationRequest = useRef(0);
-  const globalToastTimer = useRef<number>();
-  const localToastTimer = useRef<number>();
   const location = useLocation();
   const navigate = useNavigate();
   const { mode, setMode } = useTheme();
-  const { applications, applicationsLoading, processingJobs, processingRequestCount } = useInterviewFlow();
+  const {
+    applications,
+    applicationsLoading,
+    applicationsError,
+    processingJobs,
+    processingJobsError,
+    processingRequestCount,
+  } = useInterviewFlow();
   const activeProcessingCount = Math.max(
     processingJobs.filter((job) => job.status === "running" || job.importStatus === "running").length,
     processingRequestCount,
@@ -100,10 +110,20 @@ export default function AppShell() {
     if (sessionStorage.getItem("applied-yet:update-checked")) return;
     sessionStorage.setItem("applied-yet:update-checked", "1");
     const timer = window.setTimeout(() => {
-      void checkForUpdate().then(setAvailableUpdate).catch(() => undefined);
+      void checkForUpdate().then(async (update) => {
+        if (!update) return;
+        const confirmed = await requestConfirmation({
+          title: `发现新版本 v${update.version}`,
+          message: `当前版本 v${update.currentVersion}。可以前往设置查看更新内容并安装。`,
+          confirmLabel: "查看并更新",
+          cancelLabel: "稍后",
+          kind: "info",
+        });
+        if (confirmed) navigate("/settings?tab=updates");
+      }).catch(() => undefined);
     }, 2500);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [navigate]);
 
   useEffect(() => { void refreshNotifications(); }, [location.pathname]);
 
@@ -127,19 +147,21 @@ export default function AppShell() {
       void getProviderSettings().then((settings) => {
         if (disposed || revision !== schedulerRevision || !settings.email.enabled) return;
         const runAutomaticSync = () => {
-          void syncEmails().then((result) => {
-            void refreshIndex();
+          void trackOperation("自动检查招聘邮件", async (operation) => {
+            operation.update("正在连接已启用的邮箱账户");
+            const result = await syncEmails();
+            await refreshIndex();
             if (result.failedCount > 0) {
               const failed = result.accounts.filter((account) => account.status === "failed");
-              setToastKind("error");
-              setToast(`邮件自动检查部分失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`);
+              showFeedback({
+                title: "邮件自动检查部分失败",
+                message: failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；"),
+                kind: "error",
+              });
             }
           }).catch((reason) => {
             void refreshIndex();
-            setToastKind("error");
-            setToast(`邮件自动检查异常：${String(reason)}`);
-            if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
-            localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 6000);
+            showError(reason, "邮件自动检查异常");
           });
         };
         runAutomaticSync();
@@ -169,42 +191,73 @@ export default function AppShell() {
   }, [applications, applicationsLoading, location.pathname]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToast((payload) => {
-      if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current);
-      setGlobalToast(payload);
-      globalToastTimer.current = window.setTimeout(() => {
-        setGlobalToast(null);
-        globalToastTimer.current = undefined;
-      }, payload.duration ?? 3200);
-    });
-    return () => {
-      unsubscribe();
-      if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current);
-      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
-    };
-  }, []);
+    if (applicationsError) showError(applicationsError, "投递数据操作失败");
+  }, [applicationsError]);
+
+  useEffect(() => {
+    if (processingJobsError) showError(processingJobsError, "材料处理状态读取失败");
+  }, [processingJobsError]);
+
+  useGSAP(() => {
+    if (!notificationOpen || !notificationRef.current) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    gsap.fromTo(
+      notificationRef.current.querySelector(".notification-panel"),
+      { autoAlpha: 0, y: reduceMotion ? 0 : -8, scale: reduceMotion ? 1 : 0.98 },
+      { autoAlpha: 1, y: 0, scale: 1, duration: reduceMotion ? 0 : 0.22, ease: "power2.out" },
+    );
+  }, { scope: notificationRef, dependencies: [notificationOpen], revertOnUpdate: true });
+
+  useGSAP(() => {
+    const page = mainRef.current?.firstElementChild;
+    if (!page) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    gsap.fromTo(
+      page,
+      { autoAlpha: 0, y: reduceMotion ? 0 : 10 },
+      { autoAlpha: 1, y: 0, duration: reduceMotion ? 0 : 0.32, ease: "power2.out", clearProps: "transform,opacity,visibility" },
+    );
+  }, { scope: shellRef, dependencies: [location.pathname], revertOnUpdate: true });
+
+  useGSAP(() => {
+    if (!searchOpen) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    gsap.fromTo(
+      ".command-backdrop",
+      { autoAlpha: 0 },
+      { autoAlpha: 1, duration: reduceMotion ? 0 : 0.16, ease: "power1.out" },
+    );
+    gsap.fromTo(
+      ".command",
+      { autoAlpha: 0, y: reduceMotion ? 0 : -12, scale: reduceMotion ? 1 : 0.98 },
+      { autoAlpha: 1, y: 0, scale: 1, duration: reduceMotion ? 0 : 0.24, ease: "power2.out" },
+    );
+  }, { scope: shellRef, dependencies: [searchOpen], revertOnUpdate: true });
 
   const sync = async () => {
     if (syncing) return;
     setSyncing(true);
     try {
-      const result = await syncEmails();
-      const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]);
-      setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched);
-      window.dispatchEvent(new Event("email-index-changed"));
-      const failed = result.accounts.filter((account) => account.status === "failed");
-      setToastKind(failed.length ? "error" : "success");
-      setToast(failed.length
-        ? `已检查 ${result.successCount} 个邮箱，${result.failedCount} 个失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`
-        : `已识别 ${result.recognized} 封招聘邮件，其中 ${result.matched} 封匹配到投递`);
-      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
-      localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 3200);
+      await trackOperation("检查招聘邮件", async (operation) => {
+        operation.update("正在连接邮箱并识别招聘流程");
+        const result = await syncEmails();
+        operation.update("正在刷新邮件索引");
+        const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]);
+        setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched);
+        window.dispatchEvent(new Event("email-index-changed"));
+        const failed = result.accounts.filter((account) => account.status === "failed");
+        showFeedback({
+          title: failed.length ? "邮件检查部分完成" : "邮件检查完成",
+          message: failed.length
+            ? `已检查 ${result.successCount} 个邮箱，${result.failedCount} 个失败：${failed.map((account) => `${account.account}（${account.reason ?? "未知原因"}）`).join("；")}`
+            : `已识别 ${result.recognized} 封招聘邮件，其中 ${result.matched} 封匹配到投递`,
+          kind: failed.length ? "warning" : "success",
+        });
+      });
     } catch (reason) {
       const [items, stats] = await Promise.all([listEmailMessages(), getEmailStats()]).catch(() => [undefined, undefined] as const);
       if (items && stats) { setEmailMessages(items); setEmailPending(stats.pending + stats.unmatched); }
-      setToastKind("error"); setToast(`邮件检查失败：${String(reason)}`);
-      if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current);
-      localToastTimer.current = window.setTimeout(() => { setToast(""); localToastTimer.current = undefined; }, 4200);
+      showError(reason, "邮件检查失败");
     }
     finally { setSyncing(false); }
   };
@@ -233,7 +286,7 @@ export default function AppShell() {
     {results.length ? results.map((result,index)=><button key={index} onClick={()=>{navigate(result.to);setSearchOpen(false)}}><Search size={16}/><span><strong>{result.label}</strong><small>{result.detail}</small></span><span>打开</span></button>) : !applicationsLoading && <p>没有找到相关内容</p>}
   </> : <><h4>快速操作</h4><button onClick={()=>{navigate('/applications?new=1');setSearchOpen(false)}}><Plus size={16}/><span><strong>新增投递</strong><small>记录新的公司与岗位</small></span><kbd>Ctrl N</kbd></button><button onClick={()=>{navigate('/emails');setSearchOpen(false)}}><Inbox size={16}/><span><strong>查看待确认邮件</strong><small>{emailPending ? `${emailPending} 封邮件需要处理` : "暂无待确认邮件"}</small></span></button></>;
 
-  return <div className={`app-shell ${collapsed ? "is-collapsed" : ""}`}>
+  return <div ref={shellRef} className={`app-shell ${collapsed ? "is-collapsed" : ""}`}>
     <TitleBar />
     <aside className="sidebar">
       <div className="brand">{brandImageFailed ? <span className="brand-mark brand-mark--fallback" aria-label="投了吗"><Check size={23}/></span> : <img className="brand-mark" src="/icon.png" alt="投了吗" onError={() => setBrandImageFailed(true)} />}<div className="brand-copy"><strong>投了吗</strong><span>Applied Yet?</span></div></div>
@@ -246,7 +299,7 @@ export default function AppShell() {
         <button className="search-trigger" onClick={() => setSearchOpen(true)}><Search size={18}/><span>搜索公司、岗位、邮件、面试记录…</span><kbd>Ctrl K</kbd></button>
         <div className="top-actions">
           {!hasLocalDatabase && <span className="demo-mode-badge" title="当前为预览模式，数据仅供预览，刷新可重置">预览模式</span>}
-          {activeProcessingCount > 0 && <button className="processing-global-status" onClick={() => navigate("/reviews")}><span/><FileCheck2 size={15}/>面试材料处理中 · {activeProcessingCount}</button>}
+          <OperationCenter processingJobs={processingJobs} processingRequestCount={processingRequestCount} onOpenProcessing={() => navigate("/reviews")} />
           <span className="today"><CalendarDays size={17}/>{todayLabel}</span>
           <button className="button button--secondary sync-button" disabled={syncing} onClick={sync}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "正在同步…" : "检查邮件"}</button>
           <button className="icon-button" aria-label="主题切换" title={`主题：${mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统"}`} onClick={() => setMode(mode === "light" ? "dark" : mode === "dark" ? "system" : "light")}>{mode === "light" ? <Sun size={18}/> : mode === "dark" ? <Moon size={18}/> : <Monitor size={18}/>}</button>
@@ -254,10 +307,9 @@ export default function AppShell() {
           <button className="user-button" onClick={() => navigate("/settings")} title="前往我的简历"><span>{surname || "我"}</span><b>{surname ? `${surname}同学` : "我的资料"}</b><ChevronDown size={14}/></button>
         </div>
       </header>
-      <main key={location.pathname}><Outlet /></main>
+      <main ref={mainRef} key={location.pathname}><Outlet /></main>
     </div>
-    {(toast || globalToast) && (() => { const kind = globalToast?.kind ?? toastKind; return <div className={`toast toast--${kind}`}>{kind === "error" ? <AlertCircle size={17}/> : kind === "info" ? <Info size={17}/> : <Check size={17}/>} {globalToast?.message ?? toast}<button onClick={() => { if (localToastTimer.current !== undefined) window.clearTimeout(localToastTimer.current); if (globalToastTimer.current !== undefined) window.clearTimeout(globalToastTimer.current); localToastTimer.current = undefined; globalToastTimer.current = undefined; setToast(""); setGlobalToast(null); }}><X size={15}/></button></div>; })()}
-    {availableUpdate && <div className="update-toast" role="status"><span><Download size={19}/></span><div><strong>发现新版本 v{availableUpdate.version}</strong><p>当前版本 v{availableUpdate.currentVersion}，点击查看更新内容并安装。</p><button type="button" onClick={() => { setAvailableUpdate(null); navigate("/settings?tab=updates"); }}>查看并更新</button></div><button type="button" className="update-toast-close" aria-label="关闭更新提示" onClick={() => setAvailableUpdate(null)}><X size={15}/></button></div>}
-    {searchOpen && <div className="modal-backdrop" onMouseDown={() => setSearchOpen(false)}><div className="command" onMouseDown={(e)=>e.stopPropagation()}><div className="command-input"><Search size={20}/><input autoFocus value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索公司、岗位、邮件、面试记录…"/><kbd>ESC</kbd></div><div className="command-body">{searchContent}</div></div></div>}
+    <FeedbackCenter />
+    {searchOpen && <div className="modal-backdrop command-backdrop" onMouseDown={() => setSearchOpen(false)}><div className="command" onMouseDown={(e)=>e.stopPropagation()}><div className="command-input"><Search size={20}/><input autoFocus value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="搜索公司、岗位、邮件、面试记录…"/><kbd>ESC</kbd></div><div className="command-body">{searchContent}</div></div></div>}
   </div>;
 }
