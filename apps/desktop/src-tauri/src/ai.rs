@@ -373,7 +373,7 @@ pub async fn generate_interview_review(
             )
             .await
             {
-                Ok(text) => match serde_json::from_str::<InterviewReviewSet>(strip_json_fence(&text)) {
+                Ok(text) => match parse_interview_review(&text) {
                     Ok(result) if valid_interview_review(&session, &result) => {
                         let response = serde_json::to_string(&result).map_err(|error| error.to_string())?;
                         let reviewed = database.save_interview_session_review(
@@ -623,6 +623,263 @@ fn strip_json_fence(value: &str) -> &str {
         .or_else(|| value.strip_prefix("```"))
         .unwrap_or(value);
     value.strip_suffix("```").unwrap_or(value).trim()
+}
+
+fn parse_interview_review(text: &str) -> Result<InterviewReviewSet, String> {
+    let text = strip_json_fence(text);
+    let strict_error = match serde_json::from_str::<InterviewReviewSet>(text) {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+    let value = parse_first_json_value(text)
+        .ok_or_else(|| format!("模型输出中没有可解析的复盘 JSON（严格校验：{strict_error}）"))?;
+    if let Ok(result) = serde_json::from_value::<InterviewReviewSet>(value.clone()) {
+        return Ok(result);
+    }
+    normalize_interview_review(&value).ok_or_else(|| {
+        let fields = value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>().join(", "))
+            .filter(|fields| !fields.is_empty())
+            .unwrap_or_else(|| "非对象结构".to_string());
+        format!(
+            "无法识别复盘 JSON 中的逐题评价结构（顶层字段：{fields}；严格校验：{strict_error}）"
+        )
+    })
+}
+
+fn parse_first_json_value(text: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str(text) {
+        return Some(value);
+    }
+    text.char_indices()
+        .filter(|(_, character)| matches!(character, '{' | '['))
+        .find_map(|(index, _)| {
+            let mut deserializer = serde_json::Deserializer::from_str(&text[index..]);
+            Value::deserialize(&mut deserializer).ok()
+        })
+}
+
+fn normalize_interview_review(value: &Value) -> Option<InterviewReviewSet> {
+    let (object, reviews) = match value {
+        Value::Array(_) => (None, value),
+        Value::Object(object) => {
+            if let Some(reviews) = find_review_collection(object) {
+                (Some(object), reviews)
+            } else {
+                let nested = [
+                    "result",
+                    "data",
+                    "interviewReview",
+                    "interview_review",
+                    "review",
+                    "output",
+                ]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(Value::as_object))?;
+                (Some(nested), find_review_collection(nested)?)
+            }
+        }
+        _ => return None,
+    };
+    let reviews = match reviews {
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| normalize_question_review(item, None))
+            .collect::<Vec<_>>(),
+        Value::Object(items) => items
+            .iter()
+            .filter_map(|(question_id, item)| {
+                normalize_question_review(item, Some(question_id.as_str()))
+            })
+            .collect::<Vec<_>>(),
+        _ => return None,
+    };
+    if reviews.is_empty() {
+        return None;
+    }
+    let summary = object
+        .and_then(|object| {
+            [
+                "summary",
+                "overallSummary",
+                "overall_summary",
+                "reviewSummary",
+                "review_summary",
+                "overallEvaluation",
+                "overall_evaluation",
+                "overallFeedback",
+                "overall_feedback",
+                "总结",
+                "总体评价",
+            ]
+            .iter()
+            .find_map(|key| object.get(*key).and_then(review_text))
+        })
+        .filter(|summary| !summary.trim().is_empty())
+        .unwrap_or_else(|| fallback_review_summary(&reviews));
+    Some(InterviewReviewSet { summary, reviews })
+}
+
+fn find_review_collection(object: &serde_json::Map<String, Value>) -> Option<&Value> {
+    [
+        "reviews",
+        "reviewItems",
+        "review_items",
+        "evaluations",
+        "questionReviews",
+        "question_reviews",
+        "questionEvaluations",
+        "question_evaluations",
+        "feedbacks",
+        "items",
+        "details",
+        "逐题评价",
+        "逐题复盘",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key))
+}
+
+fn fallback_review_summary(reviews: &[InterviewQuestionReview]) -> String {
+    let total: i64 = reviews.iter().map(|review| review.score).sum();
+    let average = total as f64 / reviews.len() as f64;
+    format!(
+        "本次复盘共评价 {} 道题，平均得分 {:.1} 分；具体表现与改进建议见逐题评价。",
+        reviews.len(),
+        average
+    )
+}
+
+fn normalize_question_review(
+    value: &Value,
+    fallback_question_id: Option<&str>,
+) -> Option<InterviewQuestionReview> {
+    let object = value.as_object()?;
+    let question_id = [
+        "questionId",
+        "questionID",
+        "question_id",
+        "id",
+        "问题编号",
+        "题目编号",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key).and_then(json_text))
+    .or_else(|| fallback_question_id.map(str::to_string))?;
+    let score = [
+        "score",
+        "rating",
+        "overallScore",
+        "overall_score",
+        "分数",
+        "评分",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key).and_then(json_i64))?;
+    let evaluation = [
+        "evaluation",
+        "feedback",
+        "comment",
+        "suggestion",
+        "analysis",
+        "assessment",
+        "review",
+        "评价",
+        "改进建议",
+    ]
+    .iter()
+    .find_map(|key| object.get(*key).and_then(review_text))
+    .or_else(|| review_parts_text(object))?;
+    if question_id.trim().is_empty() || evaluation.trim().is_empty() {
+        return None;
+    }
+    Some(InterviewQuestionReview {
+        question_id,
+        score,
+        evaluation,
+    })
+}
+
+fn review_parts_text(object: &serde_json::Map<String, Value>) -> Option<String> {
+    let text = [
+        "strengths",
+        "weaknesses",
+        "improvements",
+        "suggestions",
+        "accuracy",
+        "completeness",
+        "structure",
+        "evidence",
+        "expression",
+        "优点",
+        "不足",
+        "问题",
+        "建议",
+        "改进方向",
+    ]
+    .iter()
+    .filter_map(|key| {
+        object
+            .get(*key)
+            .and_then(review_text)
+            .map(|text| format!("{key}：{text}"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|value| value.round() as i64)),
+        Value::String(text) => {
+            let number = text
+                .trim()
+                .trim_end_matches("/100")
+                .trim_end_matches('分')
+                .trim();
+            number.parse::<f64>().ok().map(|value| value.round() as i64)
+        }
+        Value::Object(object) => {
+            if let Some(score) = ["value", "score", "rating", "overall", "总分", "分数"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(json_i64))
+            {
+                return Some(score);
+            }
+            let scores = object.values().filter_map(json_i64).collect::<Vec<_>>();
+            (!scores.is_empty())
+                .then(|| scores.iter().sum::<i64>() as f64 / scores.len() as f64)
+                .map(|average| average.round() as i64)
+        }
+        Value::Array(items) => {
+            let scores = items.iter().filter_map(json_i64).collect::<Vec<_>>();
+            (!scores.is_empty())
+                .then(|| scores.iter().sum::<i64>() as f64 / scores.len() as f64)
+                .map(|average| average.round() as i64)
+        }
+        _ => None,
+    }
+}
+
+fn review_text(value: &Value) -> Option<String> {
+    if let Some(text) = json_text(value) {
+        return Some(text);
+    }
+    let object = value.as_object()?;
+    let text = object
+        .iter()
+        .filter_map(|(key, value)| {
+            review_text(value)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| format!("{key}：{text}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
 }
 
 fn parse_transcript_interview(text: &str) -> Result<TranscriptInterview, String> {
@@ -1028,6 +1285,105 @@ mod tests {
             r#"{"metadata":{"question":"不应被解析的问题","answer":"不应被解析的回答"}}"#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn interview_review_parser_normalizes_structured_text_fields() {
+        let result = parse_interview_review(
+            r#"{
+                "summary":{"text":"整体回答方向正确。"},
+                "reviews":[{
+                    "questionId":{"value":"question-1"},
+                    "score":{"value":82},
+                    "evaluation":{
+                        "strengths":"概念准确。",
+                        "suggestions":["补充业务指标。","说明技术取舍。"]
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(result.summary, "整体回答方向正确。");
+        assert_eq!(result.reviews.len(), 1);
+        assert_eq!(result.reviews[0].question_id, "question-1");
+        assert_eq!(result.reviews[0].score, 82);
+        assert!(result.reviews[0].evaluation.contains("概念准确"));
+        assert!(result.reviews[0].evaluation.contains("技术取舍"));
+    }
+
+    #[test]
+    fn interview_review_parser_accepts_common_aliases_and_wrapper() {
+        let result = parse_interview_review(
+            r#"{"result":{
+                "overallSummary":"需要加强案例证据。",
+                "evaluations":[{
+                    "question_id":"question-2",
+                    "rating":"70",
+                    "feedback":{"content":"回答完整，但缺少量化结果。"}
+                }]
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(result.summary, "需要加强案例证据。");
+        assert_eq!(result.reviews[0].question_id, "question-2");
+        assert_eq!(result.reviews[0].score, 70);
+        assert_eq!(result.reviews[0].evaluation, "回答完整，但缺少量化结果。");
+    }
+
+    #[test]
+    fn interview_review_parser_builds_factual_summary_when_model_omits_it() {
+        let result = parse_interview_review(
+            r#"{
+                "reviews":[
+                    {"questionId":"question-1","score":80,"evaluation":"概念准确。"},
+                    {"questionId":"question-2","score":60,"evaluation":"需要补充案例。"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            result.summary,
+            "本次复盘共评价 2 道题，平均得分 70.0 分；具体表现与改进建议见逐题评价。"
+        );
+    }
+
+    #[test]
+    fn interview_review_parser_accepts_id_keyed_reviews_and_dimension_scores() {
+        let result = parse_interview_review(
+            r#"{
+                "summary":{"strengths":["表达清晰"],"weaknesses":["案例不足"]},
+                "question_reviews":{
+                    "question-1":{
+                        "score":{"accuracy":80,"completeness":70},
+                        "strengths":"概念准确。",
+                        "improvements":["补充数据。","说明取舍。"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(result.reviews[0].question_id, "question-1");
+        assert_eq!(result.reviews[0].score, 75);
+        assert!(result.reviews[0].evaluation.contains("补充数据"));
+    }
+
+    #[test]
+    fn interview_review_parser_extracts_json_with_surrounding_model_commentary() {
+        let result = parse_interview_review(
+            r#"以下是复盘结果：
+            {
+                "summary":{"text":"整体表现稳定。"},
+                "reviews":[{
+                    "questionId":"question-1",
+                    "score":80,
+                    "evaluation":{"text":"回答方向正确。"}
+                }]
+            }
+            以上评价仅基于本次回答。"#,
+        )
+        .unwrap();
+        assert_eq!(result.summary, "整体表现稳定。");
+        assert_eq!(result.reviews[0].evaluation, "回答方向正确。");
     }
 
     #[test]
