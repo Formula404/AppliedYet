@@ -14,20 +14,26 @@ pub async fn transcribe_audio(
     path: &str,
 ) -> Result<ProcessingJobResult, String> {
     let settings = database.get_provider_settings()?.asr;
-    let metadata = fs::metadata(path).map_err(|error| format!("无法读取音频文件: {error}"))?;
-    if !metadata.is_file() {
-        return Err("音频路径不是文件".to_string());
-    }
-    let file_limit_mb = u64::try_from(settings.file_limit_mb)
-        .ok()
-        .filter(|value| (1..=2048).contains(value))
-        .ok_or_else(|| "ASR 文件大小限制无效，请重新保存设置".to_string())?;
-    if metadata.len() > file_limit_mb * 1024 * 1024 {
-        return Err(format!("音频超过 {} MB 限制", settings.file_limit_mb));
-    }
     let job_id = database.start_processing_job("asr", application_id, path)?;
     let started = Instant::now();
     let result = async {
+        let metadata = fs::metadata(path).map_err(|error| format!("无法读取音频文件: {error}"))?;
+        if !metadata.is_file() {
+            return Err("音频路径不是文件".to_string());
+        }
+        let file_limit_mb = u64::try_from(settings.file_limit_mb)
+            .ok()
+            .filter(|value| (1..=2048).contains(value))
+            .ok_or_else(|| "ASR 文件大小限制无效，请重新保存设置".to_string())?;
+        if metadata.len() > file_limit_mb * 1024 * 1024 {
+            return Err(format!("音频超过 {} MB 限制", settings.file_limit_mb));
+        }
+        if settings.speaker_diarization && !settings.supports_speaker_diarization() {
+            return Err(
+                "当前接口或模型不支持说话人区分；请使用 OpenAI diarize 模型或关闭该选项"
+                    .to_string(),
+            );
+        }
         let api_key = credentials::get_secret("asr_api_key")?;
         let part = reqwest::multipart::Part::file(path)
             .await
@@ -60,7 +66,7 @@ pub async fn transcribe_audio(
             .send()
             .await
             .map_err(|error| format!("语音识别请求失败: {error}"))?;
-        let (status, value) =
+        let (status, mut value) =
             crate::http::read_json_response(response, 32 * 1024 * 1024, "语音识别").await?;
         if !status.is_success() {
             let message = value
@@ -71,6 +77,31 @@ pub async fn transcribe_audio(
                 "语音识别服务错误 ({status}): {}",
                 message.chars().take(400).collect::<String>()
             ));
+        }
+        let transcript = value
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                value
+                    .get("segments")
+                    .and_then(Value::as_array)
+                    .map(|segments| {
+                        segments
+                            .iter()
+                            .filter_map(|segment| segment.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+            })
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| "语音识别完成，但服务没有返回可用文字".to_string())?;
+        if transcript.chars().count() > crate::MAX_INTERVIEW_MATERIAL_CHARACTERS {
+            return Err("音频转写超过 6 万字限制，请拆分录音后重试".to_string());
+        }
+        if value.get("text").and_then(Value::as_str).is_none() {
+            value["text"] = Value::String(transcript);
         }
         Ok(json!({ "model": settings.model, "language": settings.language, "transcript": value }))
     }

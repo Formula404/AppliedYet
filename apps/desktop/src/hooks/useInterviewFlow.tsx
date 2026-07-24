@@ -25,6 +25,7 @@ import {
   deleteInterviewSession,
   generateInterviewReview,
   importInterviewTranscript,
+  importProcessingJob as persistProcessingJobImport,
   listInterviewSessions,
   updateInterviewSessionAnswer,
   updateInterviewSessionProgress,
@@ -32,6 +33,16 @@ import {
   type InterviewQuestion,
   type InterviewSession,
 } from "../services/interviews";
+import {
+  deleteProcessingJob as persistProcessingJobDeletion,
+  getProcessingJobText,
+  listProcessingJobs,
+  parseDocument,
+  transcribeAudio,
+  updateProcessingJobText as persistProcessingJobText,
+  type ProcessingJobSummary,
+} from "../services/ai";
+import { showToast } from "../services/toast";
 export type { ExperienceLink } from "../services/experience";
 export type { InterviewQuestion, InterviewSession } from "../services/interviews";
 
@@ -53,6 +64,11 @@ interface InterviewFlowValue {
   selectedApplicationId: string;
   applicationsLoading: boolean;
   applicationsError: string | null;
+  processingJobs: ProcessingJobSummary[];
+  processingJobsLoading: boolean;
+  processingJobsError: string | null;
+  processingJobsHasMore: boolean;
+  processingRequestCount: number;
   setSelectedApplicationId: (id: string) => void;
   updateApplicationStage: (id: string, stage: string, stageTone: Application["stageTone"]) => Promise<void>;
   createApplication: (input: CreateApplicationInput) => Promise<Application>;
@@ -70,6 +86,13 @@ interface InterviewFlowValue {
   completeSession: (id: string) => Promise<InterviewSession>;
   reviewSession: (id: string, confirmAiSend: boolean) => Promise<InterviewSession>;
   importTranscript: (applicationId: string, transcript: string, confirmAiSend: boolean) => Promise<InterviewSession>;
+  importProcessingJob: (jobId: string, confirmAiSend: boolean) => Promise<InterviewSession>;
+  processInterviewMaterial: (kind: "document" | "audio", path: string, applicationId: string) => Promise<void>;
+  refreshProcessingJobs: () => Promise<void>;
+  loadMoreProcessingJobs: () => void;
+  getProcessingJobText: (jobId: string) => Promise<string>;
+  updateProcessingJobText: (jobId: string, text: string) => Promise<void>;
+  deleteProcessingJob: (jobId: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
 }
 
@@ -111,6 +134,13 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
   const [applications, setApplications] = useState<Application[]>(() => hasLocalDatabase ? [] : initialApplications.map((item) => ({ ...item })));
   const [applicationsLoading, setApplicationsLoading] = useState(hasLocalDatabase);
   const [applicationsError, setApplicationsError] = useState<string | null>(null);
+  const [processingJobs, setProcessingJobs] = useState<ProcessingJobSummary[]>([]);
+  const [processingJobsLoading, setProcessingJobsLoading] = useState(hasLocalDatabase);
+  const [processingJobsError, setProcessingJobsError] = useState<string | null>(null);
+  const [processingJobsHasMore, setProcessingJobsHasMore] = useState(false);
+  const [processingJobLimit, setProcessingJobLimit] = useState(30);
+  const [processingRequestCount, setProcessingRequestCount] = useState(0);
+  const knownProcessingStates = useRef<Map<string, string>>();
   const stageUpdateQueues = useRef(new Map<string, Promise<void>>());
   const sessionAnswerQueues = useRef(new Map<string, Promise<void>>());
   const pendingSessionAnswers = useRef(new Map<string, { sessionId: string; questionId: string; answer: string }>());
@@ -160,6 +190,40 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshProcessingJobs = useCallback(async () => {
+    if (!hasLocalDatabase) return;
+    try {
+      const items = await listProcessingJobs(processingJobLimit + 1);
+      const visible = items.slice(0, processingJobLimit);
+      const nextStates = new Map(visible.map((job) => [job.id, `${job.status}:${job.importStatus}`]));
+      const previousStates = knownProcessingStates.current;
+      if (previousStates) {
+        for (const job of visible) {
+          const previous = previousStates.get(job.id);
+          const current = nextStates.get(job.id);
+          if (!previous || previous === current) continue;
+          if (job.status === "succeeded" && job.importStatus === "pending") {
+            showToast(`${job.kind === "asr" ? "音频转写" : "文档解析"}完成，可前往面试复盘检查文字`, "success", 5200);
+          } else if (job.status === "failed") {
+            showToast(`${job.kind === "asr" ? "音频转写" : "文档解析"}失败：${job.errorMessage ?? "未知错误"}`, "error", 6000);
+          } else if (job.importStatus === "succeeded") {
+            showToast("面试记录生成完成", "success", 5200);
+          } else if (job.importStatus === "failed") {
+            showToast(`面试记录生成失败：${job.importErrorMessage ?? "未知错误"}`, "error", 6000);
+          }
+        }
+      }
+      knownProcessingStates.current = nextStates;
+      setProcessingJobs(visible);
+      setProcessingJobsHasMore(items.length > processingJobLimit);
+      setProcessingJobsError(null);
+    } catch (error) {
+      setProcessingJobsError(String(error));
+    } finally {
+      setProcessingJobsLoading(false);
+    }
+  }, [processingJobLimit]);
+
   useEffect(() => {
     if (!hasLocalDatabase) return;
     refreshApplications().catch(() => undefined);
@@ -170,6 +234,20 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       .then(setSessions)
       .catch((error) => setApplicationsError(String(error)));
   }, [refreshApplications]);
+
+  useEffect(() => {
+    void refreshProcessingJobs();
+  }, [refreshProcessingJobs]);
+
+  useEffect(() => {
+    if (!hasLocalDatabase) return;
+    const hasRunningJob = processingJobs.some((job) => job.status === "running" || job.importStatus === "running");
+    if (!hasRunningJob && processingRequestCount === 0) return;
+    const timer = window.setInterval(() => {
+      void refreshProcessingJobs();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [processingJobs, processingRequestCount, refreshProcessingJobs]);
 
   useEffect(() => {
     if (!hasLocalDatabase) return;
@@ -188,7 +266,14 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
     selectedApplicationId,
     applicationsLoading,
     applicationsError,
+    processingJobs,
+    processingJobsLoading,
+    processingJobsError,
+    processingJobsHasMore,
+    processingRequestCount,
     refreshApplications,
+    refreshProcessingJobs,
+    loadMoreProcessingJobs: () => setProcessingJobLimit((current) => current + 30),
     archiveApplication: async (id, archived) => {
       if (hasLocalDatabase) {
         await persistApplicationArchived(id, archived);
@@ -424,13 +509,60 @@ export function InterviewFlowProvider({ children }: { children: ReactNode }) {
       setSessions((current) => [imported, ...current]);
       return imported;
     },
+    importProcessingJob: async (jobId, confirmAiSend) => {
+      if (!hasLocalDatabase) throw new Error("浏览器演示模式不支持导入真实面试材料");
+      setProcessingRequestCount((current) => current + 1);
+      try {
+        const imported = await persistProcessingJobImport(jobId, confirmAiSend);
+        knownProcessingStates.current = new Map(knownProcessingStates.current).set(jobId, "succeeded:succeeded");
+        setSessions((current) => [imported, ...current.filter((item) => item.id !== imported.id)]);
+        showToast("面试记录生成完成");
+        return imported;
+      } catch (error) {
+        knownProcessingStates.current = new Map(knownProcessingStates.current).set(jobId, "succeeded:failed");
+        showToast(`面试记录生成失败：${String(error)}`, "error", 6000);
+        throw error;
+      } finally {
+        setProcessingRequestCount((current) => Math.max(0, current - 1));
+        await refreshProcessingJobs();
+      }
+    },
+    processInterviewMaterial: async (kind, path, applicationId) => {
+      if (!hasLocalDatabase) throw new Error("浏览器演示模式不支持导入真实面试材料");
+      setProcessingRequestCount((current) => current + 1);
+      try {
+        const result = kind === "document"
+          ? await parseDocument(path, applicationId)
+          : await transcribeAudio(path, applicationId);
+        knownProcessingStates.current = new Map(knownProcessingStates.current).set(result.id, `${result.status}:pending`);
+        showToast(kind === "document" ? "文档解析完成，请检查文字后生成面试记录" : "音频转写完成，请检查文字后生成面试记录", "success", 5200);
+      } catch (error) {
+        showToast(`${kind === "document" ? "文档解析" : "音频转写"}失败：${String(error)}`, "error", 6000);
+        throw error;
+      } finally {
+        setProcessingRequestCount((current) => Math.max(0, current - 1));
+        await refreshProcessingJobs();
+      }
+    },
+    getProcessingJobText,
+    updateProcessingJobText: async (jobId, text) => {
+      await persistProcessingJobText(jobId, text);
+      await refreshProcessingJobs();
+      showToast("面试文字已保存");
+    },
+    deleteProcessingJob: async (jobId) => {
+      await persistProcessingJobDeletion(jobId);
+      knownProcessingStates.current?.delete(jobId);
+      await refreshProcessingJobs();
+      showToast("材料处理记录已删除");
+    },
     deleteSession: async (id) => {
       if (hasLocalDatabase) await deleteInterviewSession(id);
       for (const key of pendingSessionAnswers.current.keys()) if (key.startsWith(`${id}:`)) pendingSessionAnswers.current.delete(key);
       for (const key of sessionAnswerErrors.current.keys()) if (key.startsWith(`${id}:`)) sessionAnswerErrors.current.delete(key);
       setSessions((current) => current.filter((session) => session.id !== id));
     },
-  }), [applications, applicationsError, applicationsLoading, eligibleApplications, experienceLinks, refreshApplications, selectedApplicationId, sessions]);
+  }), [applications, applicationsError, applicationsLoading, eligibleApplications, experienceLinks, processingJobs, processingJobsError, processingJobsHasMore, processingJobsLoading, processingRequestCount, refreshApplications, refreshProcessingJobs, selectedApplicationId, sessions]);
 
   return <InterviewFlowContext.Provider value={value}>{children}</InterviewFlowContext.Provider>;
 }

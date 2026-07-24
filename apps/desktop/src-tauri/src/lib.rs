@@ -14,6 +14,9 @@ mod resume;
 mod resume_ai;
 mod system_proxy;
 
+pub(crate) const MAX_INTERVIEW_MATERIAL_CHARACTERS: usize = 60_000;
+pub(crate) const MAX_INTERVIEW_QUESTIONS: usize = 30;
+
 use db::Database;
 
 #[tauri::command]
@@ -124,6 +127,11 @@ pub fn run() {
             commands::ai::generate_resume_questions,
             commands::processing::parse_document,
             commands::processing::transcribe_audio,
+            commands::processing::list_processing_jobs,
+            commands::processing::get_processing_job_text,
+            commands::processing::update_processing_job_text,
+            commands::processing::delete_processing_job,
+            commands::processing::import_processing_job,
             commands::resumes::list_resume_profiles,
             commands::resumes::import_resume_profile,
             commands::resumes::update_resume_profile,

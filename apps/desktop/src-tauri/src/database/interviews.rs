@@ -1,6 +1,8 @@
 use super::{db_error, Database};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,6 +48,27 @@ pub struct InterviewQuestionReview {
     pub evaluation: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListQuestionBankInput {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default = "default_bank_status")]
+    pub status: String,
+    #[serde(default)]
+    pub review_state: Option<String>,
+    #[serde(default)]
+    pub mastery: Vec<String>,
+    #[serde(default = "default_bank_sort")]
+    pub sort: String,
+    #[serde(default = "default_bank_direction")]
+    pub direction: String,
+    #[serde(default = "default_page_size")]
+    pub page_size: i64,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionBankItem {
@@ -54,10 +77,78 @@ pub struct QuestionBankItem {
     pub category: String,
     pub best_answer: String,
     pub mastery: String,
-    pub source: String,
-    pub occurrence_count: i64,
-    pub last_seen_at: String,
+    pub system_mastery: String,
+    pub manual_mastery: Option<String>,
+    pub membership_status: String,
+    pub real_interview_count: i64,
+    pub asked_count: i64,
+    pub practice_count: i64,
+    pub reference_count: i64,
+    pub company_count: i64,
+    pub legacy_count: i64,
+    pub last_real_asked_at: Option<String>,
+    pub last_practiced_at: Option<String>,
+    pub next_review_at: Option<String>,
+    pub created_at: String,
+    pub sources: Vec<String>,
+    pub needs_review: bool,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionBankFacets {
+    pub active: i64,
+    pub due: i64,
+    pub pending_matches: i64,
+    pub archived: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionBankPage {
+    pub items: Vec<QuestionBankItem>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
+    pub facets: QuestionBankFacets,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionEvidence {
+    pub id: String,
+    pub event_type: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub source_item_id: String,
+    pub prompt: String,
+    pub company: Option<String>,
+    pub position: Option<String>,
+    pub round: Option<String>,
+    pub occurred_at: String,
+    pub verification_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionBankDetail {
+    #[serde(flatten)]
+    pub item: QuestionBankItem,
+    pub variants: Vec<String>,
+    pub evidence: Vec<QuestionEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionMatchCandidate {
+    pub question: QuestionBankItem,
+    pub score: f64,
+    pub reason: String,
+}
+
+fn default_bank_status() -> String { "active".into() }
+fn default_bank_sort() -> String { "review_priority".into() }
+fn default_bank_direction() -> String { "desc".into() }
+fn default_page_size() -> i64 { 30 }
 
 impl Database {
     pub fn list_interview_sessions(&self) -> Result<Vec<InterviewSessionRecord>, String> {
@@ -94,7 +185,7 @@ impl Database {
         status: &str,
         questions: &[CreateInterviewQuestion],
     ) -> Result<InterviewSessionRecord, String> {
-        if questions.is_empty() || questions.len() > 30 {
+        if questions.is_empty() || questions.len() > crate::MAX_INTERVIEW_QUESTIONS {
             return Err("面试会话的问题数量必须在 1 到 30 之间".into());
         }
         if !matches!(session_type, "模拟面试" | "真实面试")
@@ -122,15 +213,31 @@ impl Database {
         let transaction = connection.transaction().map_err(db_error)?;
         let application_exists: bool = transaction
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM applications WHERE id=?1 AND deleted_at IS NULL AND archived_at IS NULL
-                   AND current_stage NOT LIKE '%拒绝%' AND lower(current_stage) NOT LIKE '%offer%'
-                   AND current_stage NOT LIKE '%人才库%' AND current_stage NOT IN ('流程暂停','流程结束','主动放弃'))",
-                [application_id],
+                "SELECT EXISTS(
+                    SELECT 1 FROM applications
+                    WHERE id=?1 AND deleted_at IS NULL
+                      AND (
+                        ?2='真实面试'
+                        OR (
+                          archived_at IS NULL
+                          AND current_stage NOT LIKE '%拒绝%'
+                          AND lower(current_stage) NOT LIKE '%offer%'
+                          AND current_stage NOT LIKE '%人才库%'
+                          AND current_stage NOT IN ('流程暂停','流程结束','主动放弃')
+                        )
+                      )
+                 )",
+                params![application_id, session_type],
                 |row| row.get(0),
             )
             .map_err(db_error)?;
         if !application_exists {
-            return Err("只能为使用中的投递创建面试会话".into());
+            return Err(if session_type == "真实面试" {
+                "投递记录不存在或已经删除"
+            } else {
+                "只能为使用中的投递创建模拟面试"
+            }
+            .into());
         }
         transaction
             .execute(

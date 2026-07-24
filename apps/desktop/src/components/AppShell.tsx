@@ -55,7 +55,11 @@ export default function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { mode, setMode } = useTheme();
-  const { applications, applicationsLoading } = useInterviewFlow();
+  const { applications, applicationsLoading, processingJobs, processingRequestCount } = useInterviewFlow();
+  const activeProcessingCount = Math.max(
+    processingJobs.filter((job) => job.status === "running" || job.importStatus === "running").length,
+    processingRequestCount,
+  );
   const todayLabel = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "short" }).format(currentDate);
 
   const refreshNotifications = async () => {
@@ -233,7 +237,7 @@ export default function AppShell() {
     <TitleBar />
     <aside className="sidebar">
       <div className="brand">{brandImageFailed ? <span className="brand-mark brand-mark--fallback" aria-label="投了吗"><Check size={23}/></span> : <img className="brand-mark" src="/icon.png" alt="投了吗" onError={() => setBrandImageFailed(true)} />}<div className="brand-copy"><strong>投了吗</strong><span>Applied Yet?</span></div></div>
-      <nav>{nav.map(([to, label, Icon]) => <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Icon size={19} /><span>{label}</span>{label === "招聘邮件" && emailPending > 0 && <em>{emailPending}</em>}</NavLink>)}</nav>
+      <nav>{nav.map(([to, label, Icon]) => <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}><Icon size={19} /><span>{label}</span>{label === "招聘邮件" && emailPending > 0 && <em>{emailPending}</em>}{label === "面试复盘" && activeProcessingCount > 0 && <em>{activeProcessingCount}</em>}</NavLink>)}</nav>
       <div className="streak-card"><span>连续记录</span><strong>{activity.streakDays} <small>天</small></strong><div><span>本周投递 {activity.thisWeekApplications}</span><b>{weekDifference === 0 ? "与上周持平" : `较上周 ${weekDifference > 0 ? "+" : ""}${weekDifference}`}</b></div><div className="mini-bars" title="最近 14 天的投递流程记录">{activity.dailyActivity.map((count,i)=><i key={i} style={{height: count ? Math.max(4, Math.round(count / maxActivity * 22)) : 2}} />)}</div></div>
       <button className="collapse-button" onClick={() => setCollapsed(!collapsed)} aria-label="折叠侧边栏"><Menu size={18} /></button>
     </aside>
@@ -242,6 +246,7 @@ export default function AppShell() {
         <button className="search-trigger" onClick={() => setSearchOpen(true)}><Search size={18}/><span>搜索公司、岗位、邮件、面试记录…</span><kbd>Ctrl K</kbd></button>
         <div className="top-actions">
           {!hasLocalDatabase && <span className="demo-mode-badge" title="当前为预览模式，数据仅供预览，刷新可重置">预览模式</span>}
+          {activeProcessingCount > 0 && <button className="processing-global-status" onClick={() => navigate("/reviews")}><span/><FileCheck2 size={15}/>面试材料处理中 · {activeProcessingCount}</button>}
           <span className="today"><CalendarDays size={17}/>{todayLabel}</span>
           <button className="button button--secondary sync-button" disabled={syncing} onClick={sync}><span className={syncing ? "spin" : ""}>↻</span>{syncing ? "正在同步…" : "检查邮件"}</button>
           <button className="icon-button" aria-label="主题切换" title={`主题：${mode === "light" ? "浅色" : mode === "dark" ? "深色" : "跟随系统"}`} onClick={() => setMode(mode === "light" ? "dark" : mode === "dark" ? "system" : "light")}>{mode === "light" ? <Sun size={18}/> : mode === "dark" ? <Moon size={18}/> : <Monitor size={18}/>}</button>

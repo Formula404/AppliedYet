@@ -419,10 +419,10 @@ pub async fn import_interview_transcript(
     if transcript.is_empty() {
         return Err("复盘材料中没有可解析的文字".into());
     }
-    if transcript.chars().count() > 60_000 {
+    if transcript.chars().count() > crate::MAX_INTERVIEW_MATERIAL_CHARACTERS {
         return Err("复盘材料过长，请精简到 6 万字以内".into());
     }
-    let context = database.get_ai_application_context(application_id)?;
+    let context = database.get_interview_review_application_context(application_id)?;
     let settings = database.get_provider_settings()?.ai;
     ensure_transcript_sharing_allowed(&settings)?;
     ensure_sensitive_send_confirmed(&settings, confirm_ai_send)?;
@@ -461,7 +461,7 @@ pub async fn import_interview_transcript(
                 Ok(text) => match serde_json::from_str::<TranscriptInterview>(strip_json_fence(&text)) {
                     Ok(result)
                         if !result.questions.is_empty()
-                            && result.questions.len() <= 50
+                            && result.questions.len() <= crate::MAX_INTERVIEW_QUESTIONS
                             && result.questions.iter().all(|item| !item.question.trim().is_empty()) =>
                     {
                         let questions: Vec<CreateInterviewQuestion> = result
@@ -572,7 +572,7 @@ fn transcript_schema() -> Value {
         "type":"object","additionalProperties":false,
         "properties":{
             "round":{"type":"string"},
-            "questions":{"type":"array","minItems":1,"maxItems":50,"items":{
+            "questions":{"type":"array","minItems":1,"maxItems":crate::MAX_INTERVIEW_QUESTIONS,"items":{
                 "type":"object","additionalProperties":false,
                 "properties":{"question":{"type":"string"},"answer":{"type":"string"}},
                 "required":["question","answer"]

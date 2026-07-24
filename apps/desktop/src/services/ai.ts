@@ -42,5 +42,28 @@ export const listApplicationAiCalls = (applicationId: string) => hasLocalDatabas
 export const generateResumeQuestions = (applicationId: string, count: number, confirmAiSend: boolean) => hasLocalDatabase ? invoke<PredictedQuestion[]>("generate_resume_questions", { applicationId, count, confirmAiSend }) : Promise.resolve(demoResumeQuestions(count));
 
 export interface ProcessingJobResult { id: string; kind: string; status: string; result?: Record<string, unknown>; durationMs?: number }
+export interface ProcessingJobSummary {
+  id: string;
+  kind: "document_parse" | "asr";
+  applicationId?: string;
+  sourcePath: string;
+  sourceSizeBytes?: number;
+  status: "running" | "succeeded" | "failed";
+  durationMs?: number;
+  errorMessage?: string;
+  createdAt: string;
+  completedAt?: string;
+  importStatus: "pending" | "running" | "succeeded" | "failed" | "skipped";
+  interviewSessionId?: string;
+  importErrorMessage?: string;
+  importStartedAt?: string;
+  importCompletedAt?: string;
+  textPreview?: string;
+  characterCount?: number;
+}
 export const parseDocument = (path: string, applicationId?: string) => invoke<ProcessingJobResult>("parse_document", { path, applicationId });
 export const transcribeAudio = (path: string, applicationId?: string) => invoke<ProcessingJobResult>("transcribe_audio", { path, applicationId });
+export const listProcessingJobs = (limit = 30) => invoke<ProcessingJobSummary[]>("list_processing_jobs", { limit });
+export const getProcessingJobText = (jobId: string) => invoke<string>("get_processing_job_text", { jobId });
+export const updateProcessingJobText = (jobId: string, text: string) => invoke<void>("update_processing_job_text", { jobId, text });
+export const deleteProcessingJob = (jobId: string) => invoke<void>("delete_processing_job", { jobId });

@@ -5,7 +5,6 @@ use std::{fs, io::Read, path::Path, time::Instant};
 
 const MAX_DOCUMENT_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_DOCX_XML_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_EXTRACTED_CHARACTERS: usize = 2_000_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,8 +77,8 @@ pub fn extract_document(path: &Path) -> Result<(String, String), String> {
         _ => return Err("暂不支持该文档格式；请选择 PDF、DOCX、TXT 或 Markdown".to_string()),
     };
     let text = normalize_extracted_text(&text);
-    if text.chars().count() > MAX_EXTRACTED_CHARACTERS {
-        return Err("文档提取文本超过 200 万字限制".to_string());
+    if text.chars().count() > crate::MAX_INTERVIEW_MATERIAL_CHARACTERS {
+        return Err("文档提取文本超过 6 万字限制，请精简面试材料后重试".to_string());
     }
     Ok((extension, text))
 }

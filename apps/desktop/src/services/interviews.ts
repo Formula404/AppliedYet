@@ -70,6 +70,9 @@ export const generateInterviewReview = async (id: string, confirmAiSend: boolean
 export const importInterviewTranscript = async (applicationId: string, transcript: string, confirmAiSend: boolean) =>
   mapSession(await invoke<StoredInterviewSession>("import_interview_transcript", { applicationId, transcript, confirmAiSend }));
 
+export const importProcessingJob = async (jobId: string, confirmAiSend: boolean) =>
+  mapSession(await invoke<StoredInterviewSession>("import_processing_job", { jobId, confirmAiSend }));
+
 export const deleteInterviewSession = (id: string) =>
   invoke<void>("delete_interview_session", { id });
 

@@ -3,8 +3,8 @@ mod providers;
 mod resumes;
 
 pub use ai::{
-    AiApplicationContext, AiCallSummary, ProcessingJobResult, ResumeAiContext,
-    StoredInterviewPreparation,
+    AiApplicationContext, AiCallSummary, ProcessingJobResult, ProcessingJobSummary,
+    ResumeAiContext, StoredInterviewPreparation,
 };
 pub use providers::{
     AiProviderSettings, AsrProviderSettings, EmailAccountSettings, EmailSettings, ProviderSettings,

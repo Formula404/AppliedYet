@@ -21,8 +21,8 @@ use migrations::MIGRATIONS;
 pub use models::{
     AiApplicationContext, AiCallSummary, AiProviderSettings, AsrProviderSettings,
     CreateResumeProfileInput, EmailAccountSettings, EmailSettings, ProcessingJobResult,
-    ProviderSettings, ResumeAiContext, ResumeProfile, StoredInterviewPreparation,
-    UpdateResumeProfileInput,
+    ProcessingJobSummary, ProviderSettings, ResumeAiContext, ResumeProfile,
+    StoredInterviewPreparation, UpdateResumeProfileInput,
 };
 
 pub struct Database {
@@ -344,6 +344,7 @@ impl Database {
         let mut connection = Connection::open(path).map_err(db_error)?;
         Self::configure(&connection)?;
         Self::migrate(&mut connection)?;
+        Self::recover_interrupted_processing_jobs(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             path: Mutex::new(path.to_path_buf()),
@@ -519,9 +520,33 @@ impl Database {
     fn configure(connection: &Connection) -> Result<(), String> {
         connection
             .execute_batch(
-                "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;",
+                "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA secure_delete = ON;",
             )
             .map_err(db_error)
+    }
+
+    fn recover_interrupted_processing_jobs(connection: &Connection) -> Result<(), String> {
+        connection
+            .execute(
+                "UPDATE processing_jobs
+                 SET status='failed',
+                     error_message=COALESCE(error_message,'应用上次退出时文件处理尚未完成，请重新上传'),
+                     completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE status='running'",
+                [],
+            )
+            .map_err(db_error)?;
+        connection
+            .execute(
+                "UPDATE processing_jobs
+                 SET import_status='failed',
+                     import_error_message=COALESCE(import_error_message,'应用上次退出时生成过程被中断，请重试生成'),
+                     import_completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE import_status='running'",
+                [],
+            )
+            .map_err(db_error)?;
+        Ok(())
     }
 
     fn migrate(connection: &mut Connection) -> Result<(), String> {
@@ -1625,6 +1650,12 @@ impl Database {
         if !(1..=2048).contains(&settings.file_limit_mb) {
             return Err("文件限制必须在 1 到 2048 MB 之间".to_string());
         }
+        if settings.speaker_diarization && !settings.supports_speaker_diarization() {
+            return Err(
+                "当前接口或模型不支持说话人区分；请使用 OpenAI diarize 模型或关闭该选项"
+                    .to_string(),
+            );
+        }
         self.save_provider_json("asr", &settings)
     }
 
@@ -1725,11 +1756,28 @@ impl Database {
         &self,
         application_id: &str,
     ) -> Result<AiApplicationContext, String> {
+        self.get_application_context(application_id, true)
+    }
+
+    pub fn get_interview_review_application_context(
+        &self,
+        application_id: &str,
+    ) -> Result<AiApplicationContext, String> {
+        self.get_application_context(application_id, false)
+    }
+
+    fn get_application_context(
+        &self,
+        application_id: &str,
+        require_active: bool,
+    ) -> Result<AiApplicationContext, String> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| "数据库连接锁已损坏".to_string())?;
-        ensure_active_application(&connection, application_id)?;
+        if require_active {
+            ensure_active_application(&connection, application_id)?;
+        }
         connection
             .query_row(
                 "SELECT a.id, c.name, p.title, p.department, p.location, a.current_stage,
@@ -2185,6 +2233,330 @@ impl Database {
                 .transpose()
                 .map_err(json_error)?,
         })
+    }
+
+    pub fn list_processing_jobs(&self, limit: i64) -> Result<Vec<ProcessingJobSummary>, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id,kind,application_id,source_path,status,duration_ms,error_message,
+                        created_at,completed_at,import_status,interview_session_id,
+                        import_error_message,import_started_at,import_completed_at,result_json
+                 FROM processing_jobs
+                 ORDER BY created_at DESC,rowid DESC LIMIT ?1",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([limit.max(1)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
+                ))
+            })
+            .map_err(db_error)?;
+        rows.map(|row| {
+            let (
+                id,
+                kind,
+                application_id,
+                source_path,
+                status,
+                duration_ms,
+                error_message,
+                created_at,
+                completed_at,
+                import_status,
+                interview_session_id,
+                import_error_message,
+                import_started_at,
+                import_completed_at,
+                result_json,
+            ) = row.map_err(db_error)?;
+            let text = result_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .and_then(|value| {
+                    value
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            value
+                                .pointer("/transcript/text")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .map(str::to_string)
+                });
+            let character_count = text
+                .as_deref()
+                .map(|value| value.chars().count().min(i64::MAX as usize) as i64);
+            let text_preview = text.map(|value| value.chars().take(240).collect());
+            Ok(ProcessingJobSummary {
+                id,
+                kind,
+                application_id,
+                source_size_bytes: fs::metadata(&source_path).ok().map(|value| value.len()),
+                source_path,
+                status,
+                duration_ms,
+                error_message,
+                created_at,
+                completed_at,
+                import_status,
+                interview_session_id,
+                import_error_message,
+                import_started_at,
+                import_completed_at,
+                text_preview,
+                character_count,
+            })
+        })
+        .collect()
+    }
+
+    pub fn get_processing_job_text(&self, id: &str) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let result_json: Option<String> = connection
+            .query_row(
+                "SELECT result_json FROM processing_jobs
+                 WHERE id=?1 AND status='succeeded'",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        let value: serde_json::Value = serde_json::from_str(
+            result_json
+                .as_deref()
+                .ok_or_else(|| "处理记录不存在或尚无文字结果".to_string())?,
+        )
+        .map_err(json_error)?;
+        value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                value
+                    .pointer("/transcript/text")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_string)
+            .ok_or_else(|| "处理记录中没有可编辑的文字".to_string())
+    }
+
+    pub fn update_processing_job_text(&self, id: &str, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("面试文字不能为空".into());
+        }
+        if text.chars().count() > crate::MAX_INTERVIEW_MATERIAL_CHARACTERS {
+            return Err("面试文字不能超过 6 万字".into());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let data: Option<(String, String)> = connection
+            .query_row(
+                "SELECT import_status,result_json FROM processing_jobs
+                 WHERE id=?1 AND status='succeeded'",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let (import_status, result_json) =
+            data.ok_or_else(|| "处理记录不存在或尚未成功".to_string())?;
+        if matches!(import_status.as_str(), "running" | "succeeded") {
+            return Err("正在生成或已经生成面试记录，不能再修改原文字".into());
+        }
+        let mut value: serde_json::Value =
+            serde_json::from_str(&result_json).map_err(json_error)?;
+        if let Some(object) = value.as_object_mut() {
+            if object.contains_key("text") {
+                object.insert("text".into(), serde_json::Value::String(text.into()));
+                object.insert(
+                    "characterCount".into(),
+                    serde_json::Value::from(text.chars().count() as i64),
+                );
+            } else if let Some(transcript) = object
+                .get_mut("transcript")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                transcript.insert("text".into(), serde_json::Value::String(text.into()));
+            } else {
+                return Err("处理记录格式不支持编辑".into());
+            }
+        } else {
+            return Err("处理记录格式无效".into());
+        }
+        connection
+            .execute(
+                "UPDATE processing_jobs
+                 SET result_json=?2,import_status='pending',import_error_message=NULL,
+                     import_started_at=NULL,import_completed_at=NULL
+                 WHERE id=?1",
+                params![
+                    id,
+                    serde_json::to_string(&value).map_err(|error| error.to_string())?
+                ],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn delete_processing_job(&self, id: &str) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let states: Option<(String, String)> = connection
+            .query_row(
+                "SELECT status,import_status FROM processing_jobs WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let (status, import_status) = states.ok_or_else(|| "处理记录不存在".to_string())?;
+        if status == "running" || import_status == "running" {
+            return Err("任务正在处理中，完成后才能删除".into());
+        }
+        connection
+            .execute("DELETE FROM processing_jobs WHERE id=?1", [id])
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn begin_processing_job_import(&self, id: &str) -> Result<(String, String), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        // ON DELETE SET NULL 后只重置当前材料，避免改动用户没有操作的其他记录。
+        transaction
+            .execute(
+                "UPDATE processing_jobs
+                 SET import_status='pending',interview_session_id=NULL
+                 WHERE id=?1 AND import_status='succeeded' AND interview_session_id IS NULL",
+                [id],
+            )
+            .map_err(db_error)?;
+        let data: Option<(Option<String>, String, String, Option<String>)> = transaction
+            .query_row(
+                "SELECT application_id,status,import_status,result_json
+                 FROM processing_jobs WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let (application_id, status, import_status, result_json) =
+            data.ok_or_else(|| "处理记录不存在".to_string())?;
+        if status != "succeeded" {
+            return Err("文件尚未处理成功，不能生成面试记录".into());
+        }
+        if import_status == "running" {
+            return Err("正在生成面试记录，请稍候".into());
+        }
+        if import_status == "succeeded" {
+            return Err("该材料已经生成过面试记录".into());
+        }
+        let application_id = application_id.ok_or_else(|| "处理记录未关联投递".to_string())?;
+        let value: serde_json::Value = serde_json::from_str(
+            result_json
+                .as_deref()
+                .ok_or_else(|| "处理记录缺少文字结果".to_string())?,
+        )
+        .map_err(json_error)?;
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                value
+                    .pointer("/transcript/text")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "处理记录中没有可导入的文字".to_string())?
+            .to_string();
+        transaction
+            .execute(
+                "UPDATE processing_jobs
+                 SET import_status='running',import_error_message=NULL,
+                     import_started_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                     import_completed_at=NULL
+                 WHERE id=?1",
+                [id],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok((application_id, text))
+    }
+
+    pub fn finish_processing_job_import(
+        &self,
+        id: &str,
+        session_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<(), String> {
+        const RETRY_DELAYS_MS: [u64; 3] = [0, 50, 150];
+        let mut last_error = None;
+        for delay_ms in RETRY_DELAYS_MS {
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            // 这是收尾状态写入：即使此前持锁代码 panic，也应恢复连接并尽力解除 running。
+            let connection = self
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let result = connection.execute(
+                "UPDATE processing_jobs
+                 SET import_status=?2,interview_session_id=?3,import_error_message=?4,
+                     import_completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id=?1 AND import_status='running'",
+                params![
+                    id,
+                    if session_id.is_some() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    session_id,
+                    error_message
+                ],
+            );
+            drop(connection);
+            match result {
+                Ok(1) => return Ok(()),
+                Ok(_) => {
+                    return Err("处理记录不存在或已不处于生成状态".into());
+                }
+                Err(error) => last_error = Some(db_error(error)),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "生成状态保存失败".into()))
     }
 
     pub fn list_resume_profiles(&self) -> Result<Vec<ResumeProfile>, String> {
@@ -3198,6 +3570,73 @@ mod tests {
     }
 
     #[test]
+    fn version_17_processing_jobs_upgrade_without_losing_results() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        Database::configure(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             );",
+            )
+            .unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= 17) {
+            let transaction = connection.transaction().unwrap();
+            if *version == 9 {
+                transaction
+                    .execute(
+                        "ALTER TABLE application_events ADD COLUMN recorded_at TEXT",
+                        [],
+                    )
+                    .unwrap();
+            }
+            transaction.execute_batch(sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO schema_migrations(version,name) VALUES (?1,?2)",
+                    params![version, name],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO processing_jobs(
+                    id,kind,source_path,status,result_json,duration_ms
+                 ) VALUES ('legacy-job','document_parse','legacy.txt','succeeded',
+                           '{\"text\":\"历史面试\"}',12)",
+                [],
+            )
+            .unwrap();
+
+        Database::migrate(&mut connection).unwrap();
+        let migrated: (String, String, Option<String>) = connection
+            .query_row(
+                "SELECT status,import_status,interview_session_id
+                 FROM processing_jobs WHERE id='legacy-job'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated.0, "succeeded");
+        assert_eq!(migrated.1, "pending");
+        assert!(migrated.2.is_none());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT json_extract(result_json,'$.text')
+                     FROM processing_jobs WHERE id='legacy-job'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "历史面试"
+        );
+    }
+
+    #[test]
     fn legacy_paused_stage_is_migrated_to_talent_pool() {
         let db = Database::in_memory().unwrap();
         let created = db.create_application(input()).unwrap();
@@ -3971,6 +4410,146 @@ mod tests {
     }
 
     #[test]
+    fn real_interview_review_allows_rejected_applications_and_safe_session_deletion() {
+        let db = Database::in_memory().unwrap();
+        let application = db.create_application(input()).unwrap();
+        db.update_application_stage(&application.id, "已拒绝")
+            .unwrap();
+        assert!(db.get_ai_application_context(&application.id).is_err());
+        assert!(db
+            .get_interview_review_application_context(&application.id)
+            .is_ok());
+
+        let questions = vec![CreateInterviewQuestion {
+            prompt: "介绍项目".into(),
+            source: "真实面试".into(),
+            answer: "回答".into(),
+        }];
+        let session = db
+            .create_interview_session(
+                &application.id,
+                "真实面试",
+                "历史面试",
+                "待复盘",
+                &questions,
+            )
+            .unwrap();
+        assert!(db
+            .create_interview_session(&application.id, "模拟面试", "模拟", "进行中", &questions,)
+            .is_err());
+
+        let job_id = db
+            .start_processing_job("document_parse", Some(&application.id), "rejected.txt")
+            .unwrap();
+        db.finish_processing_job(
+            &job_id,
+            "succeeded",
+            Some(r#"{"text":"问题\n回答","characterCount":5}"#),
+            None,
+            10,
+        )
+        .unwrap();
+        db.begin_processing_job_import(&job_id).unwrap();
+        db.finish_processing_job_import(&job_id, Some(&session.id), None)
+            .unwrap();
+        db.delete_interview_session(&session.id).unwrap();
+
+        let other_job_id = db
+            .start_processing_job("document_parse", Some(&application.id), "other.txt")
+            .unwrap();
+        db.finish_processing_job(
+            &other_job_id,
+            "succeeded",
+            Some(r#"{"text":"另一份材料","characterCount":5}"#),
+            None,
+            10,
+        )
+        .unwrap();
+        db.begin_processing_job_import(&other_job_id).unwrap();
+
+        let jobs = db.list_processing_jobs(10).unwrap();
+        let job = jobs.iter().find(|item| item.id == job_id).unwrap();
+        assert_eq!(job.import_status, "succeeded");
+        assert!(job.interview_session_id.is_none());
+
+        db.finish_processing_job_import(&other_job_id, None, Some("测试结束"))
+            .unwrap();
+        db.begin_processing_job_import(&job_id).unwrap();
+        let retried = db.list_processing_jobs(10).unwrap();
+        assert_eq!(
+            retried
+                .iter()
+                .find(|item| item.id == job_id)
+                .unwrap()
+                .import_status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn processing_jobs_persist_results_and_import_state() {
+        let db = Database::in_memory().unwrap();
+        let application = db.create_application(input()).unwrap();
+        let job_id = db
+            .start_processing_job("document_parse", Some(&application.id), "interview.txt")
+            .unwrap();
+        let running = db.list_processing_jobs(10).unwrap();
+        assert_eq!(running[0].status, "running");
+        assert_eq!(running[0].import_status, "pending");
+
+        db.finish_processing_job(
+            &job_id,
+            "succeeded",
+            Some(r#"{"text":"问题一\n回答一","characterCount":7}"#),
+            None,
+            1200,
+        )
+        .unwrap();
+        let (application_id, text) = db.begin_processing_job_import(&job_id).unwrap();
+        assert_eq!(application_id, application.id);
+        assert_eq!(text, "问题一\n回答一");
+        db.finish_processing_job_import(&job_id, None, Some("测试导入失败"))
+            .unwrap();
+
+        let failed = db.list_processing_jobs(10).unwrap();
+        assert_eq!(failed[0].status, "succeeded");
+        assert_eq!(failed[0].import_status, "failed");
+        assert_eq!(failed[0].character_count, Some(7));
+        assert_eq!(failed[0].text_preview.as_deref(), Some("问题一\n回答一"));
+        assert_eq!(
+            failed[0].import_error_message.as_deref(),
+            Some("测试导入失败")
+        );
+
+        let interrupted_id = db
+            .start_processing_job("asr", Some(&application.id), "interview.mp3")
+            .unwrap();
+        {
+            let connection = db.connection.lock().unwrap();
+            Database::recover_interrupted_processing_jobs(&connection).unwrap();
+        }
+        let recovered = db.list_processing_jobs(10).unwrap();
+        let interrupted = recovered
+            .iter()
+            .find(|item| item.id == interrupted_id)
+            .unwrap();
+        assert_eq!(interrupted.status, "failed");
+        assert!(interrupted
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("上次退出")));
+
+        db.update_processing_job_text(&job_id, "修正问题\n修正回答")
+            .unwrap();
+        assert_eq!(
+            db.get_processing_job_text(&job_id).unwrap(),
+            "修正问题\n修正回答"
+        );
+        db.delete_processing_job(&job_id).unwrap();
+        assert!(db.get_processing_job_text(&job_id).is_err());
+    }
+
+    #[test]
     fn provider_settings_use_defaults_validate_and_persist() {
         let db = Database::in_memory().unwrap();
         let defaults = db.get_provider_settings().unwrap();
@@ -3996,7 +4575,7 @@ mod tests {
             base_url: "https://asr.example.com/v1".into(),
             model: "transcribe-model".into(),
             language: "auto".into(),
-            speaker_diarization: true,
+            speaker_diarization: false,
             segment_seconds: 600,
             file_limit_mb: 800,
             keep_original_audio: false,

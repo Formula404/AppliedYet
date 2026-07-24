@@ -65,3 +65,25 @@ pub struct ProcessingJobResult {
     pub result: Option<serde_json::Value>,
     pub duration_ms: Option<i64>,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessingJobSummary {
+    pub id: String,
+    pub kind: String,
+    pub application_id: Option<String>,
+    pub source_path: String,
+    pub source_size_bytes: Option<u64>,
+    pub status: String,
+    pub duration_ms: Option<i64>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub import_status: String,
+    pub interview_session_id: Option<String>,
+    pub import_error_message: Option<String>,
+    pub import_started_at: Option<String>,
+    pub import_completed_at: Option<String>,
+    pub text_preview: Option<String>,
+    pub character_count: Option<i64>,
+}

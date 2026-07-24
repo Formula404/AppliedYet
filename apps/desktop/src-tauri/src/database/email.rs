@@ -1808,6 +1808,16 @@ mod tests {
             .unwrap();
         db.update_application_stage(&application.id, "HR 面试")
             .unwrap();
+        db.connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE application_events
+                 SET happened_at='2026-07-19T09:00:00Z'
+                 WHERE application_id=?1 AND stage_after='HR 面试'",
+                [&application.id],
+            )
+            .unwrap();
         db.ingest_emails(vec![
             RawEmail {
                 account: "me@example.com".into(),

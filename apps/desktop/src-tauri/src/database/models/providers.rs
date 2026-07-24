@@ -62,6 +62,16 @@ impl Default for AsrProviderSettings {
     }
 }
 
+impl AsrProviderSettings {
+    pub fn supports_speaker_diarization(&self) -> bool {
+        url::Url::parse(self.base_url.trim())
+            .ok()
+            .and_then(|value| value.host_str().map(str::to_ascii_lowercase))
+            .is_some_and(|host| host == "api.openai.com")
+            && self.model.to_ascii_lowercase().contains("diarize")
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSettings {

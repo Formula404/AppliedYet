@@ -25,7 +25,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream", "system-proxy"] }
 futures-util = "0.3"
 pdf-extract = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -36,6 +36,7 @@ mailparse = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 sha2 = "0.10"
 base64 = "0.22"
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

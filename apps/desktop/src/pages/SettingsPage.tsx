@@ -30,6 +30,13 @@ import {
 
 type Tab = "profile" | "ai" | "asr" | "email" | "data" | "privacy" | "updates";
 type CredentialKey = "ai_api_key" | "asr_api_key" | "email_password" | "email_oauth_refresh_token";
+const supportsSpeakerDiarization = (baseUrl: string, model: string) => {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com" && model.toLowerCase().includes("diarize");
+  } catch {
+    return false;
+  }
+};
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>(() => new URLSearchParams(window.location.search).get("tab") === "updates" ? "updates" : "profile");
@@ -54,7 +61,7 @@ export default function SettingsPage() {
       .then(([settings, aiKey, asrKey]) => {
         if (disposed) return;
         setAi(settings.ai);
-        setAsr(settings.asr);
+        setAsr(supportsSpeakerDiarization(settings.asr.baseUrl, settings.asr.model) ? settings.asr : { ...settings.asr, speakerDiarization: false });
         const normalized = normalizeEmailSettings(settings.email);
         setEmail(normalized);
         if (normalized.accounts[0]) {
@@ -223,6 +230,7 @@ export default function SettingsPage() {
     ["data", Database, "数据与备份"], ["privacy", ShieldCheck, "隐私与安全"], ["updates", Download, "软件更新"],
   ];
   const selectedEmailPreset = EMAIL_PROVIDER_PRESETS.find((item) => item.name === email.provider);
+  const speakerDiarizationSupported = supportsSpeakerDiarization(asr.baseUrl, asr.model);
 
   return <div className="settings-layout">
     <aside>{navigation.map(([value, Icon, label]) => <button type="button" className={tab === value ? "active" : ""} key={value} onClick={() => { setTab(value); setMessage(""); setError(""); }}><Icon size={17} />{label}</button>)}</aside>
@@ -256,12 +264,12 @@ export default function SettingsPage() {
         <Card className="privacy-card"><CardHeader title="连接行为" subtitle="放心设置，不会影响你的原邮件" /><Toggle checked={email.useTls} onChange={(useTls) => setEmail({ ...email, useTls, imapPort: useTls && email.imapPort === 143 ? 993 : email.imapPort })} label="使用 TLS 加密连接（远程服务器必须启用，防止凭据和邮件明文传输）" /><Toggle checked={email.accountEnabled ?? true} onChange={(accountEnabled) => setEmail({ ...email, accountEnabled })} label="启用当前邮箱收信" /><Toggle checked={email.enabled} onChange={(enabled) => setEmail({ ...email, enabled })} label="启用定时邮件检查（按上方间隔自动读取所有已启用邮箱）" /></Card>
       </ProviderForm>}
       {!loading && tab === "asr" && <ProviderForm title="语音识别" subtitle="配置语音转文字，方便导入面试录音" onSubmit={submitAsr} saving={saving}>
-        <Field label="接口地址" hint="OpenAI 兼容的 /audio/transcriptions 接口"><input required type="url" value={asr.baseUrl} onChange={(e) => setAsr({ ...asr, baseUrl: e.target.value })} /></Field>
-        <div className="settings-form-grid"><Field label="服务商"><input required value={asr.provider} onChange={(e) => setAsr({ ...asr, provider: e.target.value })} /></Field><Field label="转写模型"><input required value={asr.model} onChange={(e) => setAsr({ ...asr, model: e.target.value })} /></Field></div>
+        <Field label="接口地址" hint="填写 API 根地址，例如 https://api.groq.com/openai/v1；应用会自动追加 /audio/transcriptions"><input required type="url" value={asr.baseUrl} onChange={(e) => setAsr({ ...asr, baseUrl: e.target.value, speakerDiarization: supportsSpeakerDiarization(e.target.value, asr.model) ? asr.speakerDiarization : false })} /></Field>
+        <div className="settings-form-grid"><Field label="服务商"><input required value={asr.provider} onChange={(e) => setAsr({ ...asr, provider: e.target.value })} /></Field><Field label="转写模型"><input required value={asr.model} onChange={(e) => setAsr({ ...asr, model: e.target.value, speakerDiarization: supportsSpeakerDiarization(asr.baseUrl, e.target.value) ? asr.speakerDiarization : false })} /></Field></div>
         <div className="settings-form-grid"><Field label="默认语言"><select value={asr.language} onChange={(e) => setAsr({ ...asr, language: e.target.value })}><option value="zh">中文</option><option value="en">English</option><option value="auto">自动检测</option></select></Field><span /></div>
         <div className="settings-form-grid"><Field label="文件上限（MB）" hint="音频会从原文件流式上传，不会一次性载入内存或创建本地分片"><input type="number" min="1" max="2048" value={asr.fileLimitMb} onChange={(e) => setAsr({ ...asr, fileLimitMb: Number(e.target.value) })} /></Field><span /></div>
         <CredentialField status={credentialStatus.asr_api_key} value={secret.asr_api_key} onChange={(value) => setSecret({ ...secret, asr_api_key: value })} onDelete={() => removeCredential("asr_api_key")} />
-        <Card className="privacy-card"><Toggle checked={asr.speakerDiarization} onChange={(speakerDiarization) => setAsr({ ...asr, speakerDiarization })} label="启用说话人区分（区分面试中不同人的发言）" /></Card>
+        <Card className="privacy-card"><Toggle disabled={!speakerDiarizationSupported} checked={asr.speakerDiarization} onChange={(speakerDiarization) => setAsr({ ...asr, speakerDiarization })} label={speakerDiarizationSupported ? "启用说话人区分" : "当前接口或模型不支持说话人区分（Groq Whisper 等模型请保持关闭）"} /></Card>
       </ProviderForm>}
       {!loading && tab === "data" && <DataSettings />}
       {!loading && tab === "privacy" && <Card><CardHeader title="隐私与安全" subtitle="你的数据安全由你掌控" /><div className="setting-block"><div><strong>敏感凭据单独保管</strong><p>AI、语音和邮箱密码保存在 Windows 凭据管理器，不写入业务数据库或备份。</p></div><KeyRound size={20} /></div><div className="setting-block"><div><strong>本地数据由你掌控</strong><p>投递、简历和面试记录默认存放在你选择的本地目录；只有使用 AI、语音识别或邮箱检查时，相关必要内容才会发往你配置的服务。</p></div></div><div className="setting-block"><div><strong>删除会同步解除关联</strong><p>删除简历时会解除投递关系；删除或移动数据前，界面会明确提示影响范围。</p></div></div></Card>}
@@ -367,7 +375,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 function CredentialField({ label = "API Key", status, value, onChange, onDelete }: { label?: string; status: boolean; value: string; onChange: (value: string) => void; onDelete: () => void }) { return <Field label={label} hint="出于安全考虑，已保存的密钥不会回显；留空表示保持原凭据不变"><div className="credential-field"><input type="password" autoComplete="new-password" value={value} onChange={(e) => onChange(e.target.value)} placeholder={status ? "••••••••（已配置）" : `输入${label}`} /><span className={status ? "credential-state is-set" : "credential-state"}>{status ? "已配置" : "未配置"}</span>{status && <button type="button" className="text-button danger-text" onClick={onDelete}>删除</button>}</div></Field>; }
 
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) { return <label className="settings-toggle"><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} /><span>{label}</span></label>; }
+function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (checked: boolean) => void; label: string; disabled?: boolean }) { return <label className={`settings-toggle ${disabled ? "is-disabled" : ""}`}><input type="checkbox" disabled={disabled} checked={checked} onChange={(e) => onChange(e.target.checked)} /><span>{label}</span></label>; }
 
 function DataSettings() {
   const [location, setLocation] = useState("");

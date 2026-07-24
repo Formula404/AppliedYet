@@ -80,4 +80,19 @@ pub(super) const MIGRATIONS: &[(i64, &str, &str)] = &[
         "017_email_reliability",
         include_str!("../../migrations/017_email_reliability.sql"),
     ),
+    (
+        18,
+        "018_processing_job_imports",
+        include_str!("../../migrations/018_processing_job_imports.sql"),
+    ),
+    (
+        19,
+        "019_processing_job_session_fk",
+        include_str!("../../migrations/019_processing_job_session_fk.sql"),
+    ),
+    (
+        20,
+        "020_question_bank_domain",
+        include_str!("../../migrations/020_question_bank_domain.sql"),
+    ),
 ];
