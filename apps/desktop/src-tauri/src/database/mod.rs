@@ -2241,6 +2241,31 @@ impl Database {
         })
     }
 
+    pub fn update_processing_job_progress(
+        &self,
+        id: &str,
+        progress: &serde_json::Value,
+    ) -> Result<(), String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "数据库连接锁已损坏".to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE processing_jobs SET result_json=?2
+                 WHERE id=?1 AND status='running'",
+                params![
+                    id,
+                    serde_json::to_string(progress).map_err(|error| error.to_string())?
+                ],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("音频处理任务已结束或不存在".into());
+        }
+        Ok(())
+    }
+
     pub fn list_processing_jobs(&self, limit: i64) -> Result<Vec<ProcessingJobSummary>, String> {
         let connection = self
             .connection
@@ -2294,20 +2319,20 @@ impl Database {
                 import_completed_at,
                 result_json,
             ) = row.map_err(db_error)?;
-            let text = result_json
+            let result = result_json
                 .as_deref()
-                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
-                .and_then(|value| {
-                    value
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
-                        .or_else(|| {
-                            value
-                                .pointer("/transcript/text")
-                                .and_then(serde_json::Value::as_str)
-                        })
-                        .map(str::to_string)
-                });
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+            let text = result.as_ref().and_then(|value| {
+                value
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| {
+                        value
+                            .pointer("/transcript/text")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .map(str::to_string)
+            });
             let character_count = text
                 .as_deref()
                 .map(|value| value.chars().count().min(i64::MAX as usize) as i64);
@@ -2330,6 +2355,24 @@ impl Database {
                 import_completed_at,
                 text_preview,
                 character_count,
+                progress_phase: result
+                    .as_ref()
+                    .and_then(|value| value.pointer("/progress/phase"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                progress_completed: result
+                    .as_ref()
+                    .and_then(|value| value.pointer("/progress/completed"))
+                    .and_then(serde_json::Value::as_i64),
+                progress_total: result
+                    .as_ref()
+                    .and_then(|value| value.pointer("/progress/total"))
+                    .and_then(serde_json::Value::as_i64),
+                progress_message: result
+                    .as_ref()
+                    .and_then(|value| value.pointer("/progress/message"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
             })
         })
         .collect()
@@ -4649,6 +4692,29 @@ mod tests {
         let running = db.list_processing_jobs(10).unwrap();
         assert_eq!(running[0].status, "running");
         assert_eq!(running[0].import_status, "pending");
+        db.update_processing_job_progress(
+            &job_id,
+            &serde_json::json!({
+                "progress": {
+                    "phase": "transcribing",
+                    "completed": 2,
+                    "total": 6,
+                    "message": "正在转写第 3 / 6 段"
+                }
+            }),
+        )
+        .unwrap();
+        let progressing = db.list_processing_jobs(10).unwrap();
+        assert_eq!(
+            progressing[0].progress_phase.as_deref(),
+            Some("transcribing")
+        );
+        assert_eq!(progressing[0].progress_completed, Some(2));
+        assert_eq!(progressing[0].progress_total, Some(6));
+        assert_eq!(
+            progressing[0].progress_message.as_deref(),
+            Some("正在转写第 3 / 6 段")
+        );
 
         db.finish_processing_job(
             &job_id,

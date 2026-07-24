@@ -1,0 +1,17 @@
+AppliedYet includes an unmodified FFmpeg command-line executable in Windows
+installer builds to extract, mix, resample, and split interview audio locally.
+
+Bundled build:
+  FFmpeg 8.0.1 Essentials Build for Windows x64
+  Distribution: https://www.gyan.dev/ffmpeg/builds/
+  Archive: ffmpeg-8.0.1-essentials_build.zip
+  Archive SHA-256:
+  e2aaeaa0fdbc397d4794828086424d4aaa2102cef1fb6874f6ffd29c0b88b673
+
+FFmpeg source:
+  https://github.com/FFmpeg/FFmpeg/tree/n8.0.1
+  https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+
+FFmpeg is licensed separately from AppliedYet. The selected Gyan Essentials
+build is GPLv3. The installer includes the license and the build README from
+the verified upstream binary archive. See https://ffmpeg.org/legal.html.

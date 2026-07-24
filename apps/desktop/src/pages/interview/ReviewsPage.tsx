@@ -9,6 +9,7 @@ import type { ProcessingJobSummary } from "../../services/ai";
 import { requestAiSendConfirmation } from "../../services/settings";
 
 type Filter = "全部" | InterviewSession["type"];
+type ReviewView = "records" | "materials";
 interface TextEditorState { jobId: string; fileName: string; text: string; loading: boolean; saving: boolean }
 const MAX_MATERIAL_CHARACTERS = 60_000;
 const sessionTime = (value: string) => {
@@ -24,6 +25,9 @@ const formatDuration = (milliseconds: number) => {
   return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分钟`;
 };
 const jobLabel = (job: ProcessingJobSummary) => {
+  if (job.status === "running" && job.progressPhase === "preparing") return "正在预处理音频";
+  if (job.status === "running" && job.progressPhase === "transcribing") return "正在分片转写";
+  if (job.status === "running" && job.progressPhase === "merging") return "正在合并文字";
   if (job.status === "running") return "文件处理中";
   if (job.status === "failed") return "文件处理失败";
   if (job.importStatus === "running") return "AI 正在还原问答";
@@ -48,6 +52,7 @@ export default function ReviewsPage() {
     processingJobsHasMore, processingRequestCount, refreshProcessingJobs, loadMoreProcessingJobs,
     getProcessingJobText, updateProcessingJobText, deleteProcessingJob,
   } = useInterviewFlow();
+  const [view, setView] = useState<ReviewView>("records");
   const [filter, setFilter] = useState<Filter>("全部");
   const [selectedId, setSelectedId] = useState(params.get("session") ?? sessions[0]?.id);
   const [choosingFile, setChoosingFile] = useState(false);
@@ -65,6 +70,13 @@ export default function ReviewsPage() {
   const scored = selected?.questions.filter((item) => item.score !== undefined) ?? [];
   const averageScore = scored.length ? Math.round(scored.reduce((sum, item) => sum + (item.score ?? 0), 0) / scored.length) : undefined;
   const hasRunningJob = jobs.some((job) => job.status === "running" || job.importStatus === "running");
+  const materialAttentionCount = jobs.filter((job) =>
+    job.status === "running"
+    || job.status === "failed"
+    || job.importStatus === "pending"
+    || job.importStatus === "running"
+    || job.importStatus === "failed",
+  ).length;
   const busy = choosingFile || processingRequestCount > 0 || hasRunningJob;
 
   useEffect(() => {
@@ -110,7 +122,7 @@ export default function ReviewsPage() {
         directory: false,
         filters: kind === "document"
           ? [{ name: "文档", extensions: ["pdf", "docx", "txt", "md"] }]
-          : [{ name: "音频", extensions: ["mp3", "wav", "m4a", "webm", "mp4"] }],
+          : [{ name: "音频或录屏", extensions: ["mp3", "wav", "m4a", "ogg", "webm", "mp4", "mov", "mkv", "avi", "m4v"] }],
       });
       if (!path) return;
       await processInterviewMaterial(kind, path, targetApplicationId);
@@ -129,6 +141,7 @@ export default function ReviewsPage() {
       const imported = await importProcessingJob(jobId, confirmed);
       setFilter("全部");
       setSelectedId(imported.id);
+      setView("records");
     } catch (reason) {
       setProcessingError(String(reason));
     }
@@ -169,6 +182,7 @@ export default function ReviewsPage() {
   const viewSession = (id: string) => {
     setFilter("全部");
     setSelectedId(id);
+    setView("records");
   };
 
   const removeSession = async (session: InterviewSession) => {
@@ -185,16 +199,31 @@ export default function ReviewsPage() {
     }
   };
 
-  return <div className="review-page-layout">
+  return <div className="review-page">
+    <div className="review-page-head">
+      <div>
+        <span>面试复盘</span>
+        <h1>{view === "records" ? "回看每一次回答" : "从材料生成面试记录"}</h1>
+        <p>{view === "records" ? "选择一场面试，直接查看逐题回答、评分和改进建议。" : "上传文档或转写录音，确认文字后再交给 AI 还原问答。"}</p>
+      </div>
+      <div className="review-view-switch" role="tablist" aria-label="复盘页面视图">
+        <button className={view === "records" ? "active" : ""} role="tab" aria-selected={view === "records"} onClick={() => setView("records")}><MessageSquareText size={16}/><span>面试记录</span><b>{reviewableSessions.length}</b></button>
+        <button className={view === "materials" ? "active" : ""} role="tab" aria-selected={view === "materials"} onClick={() => setView("materials")}><FileText size={16}/><span>材料处理</span>{materialAttentionCount > 0 && <b>{materialAttentionCount}</b>}</button>
+      </div>
+    </div>
+
+    <div className={`review-page-layout is-${view}`}>
     <Card className="review-session-panel">
+      <div className="review-session-heading"><div><strong>面试记录</strong><small>按面试时间排列</small></div><button className="text-button" onClick={() => setView("materials")}><FileText size={14}/>导入材料</button></div>
       <div className="review-filter">{(["全部", "真实面试", "模拟面试"] as Filter[]).map((value) => <button key={value} className={filter === value ? "active" : ""} onClick={() => setFilter(value)}>{value}<b>{value === "全部" ? reviewableSessions.length : reviewableSessions.filter((item) => item.type === value).length}</b></button>)}</div>
       <div className="session-list linked-sessions">{filtered.map((session) => {
         const related = applications.find((item) => item.id === session.applicationId);
         return <button className={selected?.id === session.id ? "active" : ""} key={session.id} onClick={() => setSelectedId(session.id)}><span className="company-logo">{related?.companyMark ?? "?"}</span><span><strong>{related?.company} · {session.round}</strong><small>{session.type} · {session.questions.length} 题 · {sessionTime(session.createdAt)}</small></span><Badge tone={session.type === "真实面试" ? "blue" : "purple"}>{session.type}</Badge><ChevronRight size={16}/></button>;
-      })}</div>
+      })}{!filtered.length && <div className="review-session-empty"><MessageSquareText size={24}/><span>暂无符合条件的记录</span><button className="text-button" onClick={() => setView("materials")}>从面试材料创建</button></div>}</div>
     </Card>
 
     <div className="review-record">
+      <div className="review-record-tools">
       <Card className="review-import-card">
         <div><strong>第一步：提取面试文字</strong><p>解析完成后不会自动发送给 AI。请先检查、编辑文字，再决定是否生成面试记录。</p></div>
         <label><span>关联岗位（拒绝或已归档投递也可复盘）</span><select value={reviewApplications.find((item) => item.id === importApplicationId)?.id ?? reviewApplications.find((item) => item.id === application?.id)?.id ?? reviewApplications[0]?.id ?? ""} onChange={(event) => setImportApplicationId(event.target.value)}>{reviewApplications.map((item) => <option key={item.id} value={item.id}>{item.company} · {item.role}{item.archived ? " · 已归档" : ""}{item.stage.includes("拒绝") ? " · 已拒绝" : ""}</option>)}</select></label>
@@ -212,6 +241,9 @@ export default function ReviewsPage() {
           const elapsed = Math.max(0, now - new Date(activeSince ?? job.createdAt).getTime());
           const estimate = estimatedDuration(job);
           const remaining = Math.max(0, estimate - elapsed);
+          const chunkProgress = job.progressTotal && job.progressTotal > 0
+            ? Math.min(100, Math.max(0, ((job.progressCompleted ?? 0) / job.progressTotal) * 100))
+            : undefined;
           const isRunning = job.status === "running" || job.importStatus === "running";
           const error = job.errorMessage ?? job.importErrorMessage;
           const editable = job.status === "succeeded" && !["running", "succeeded"].includes(job.importStatus);
@@ -220,7 +252,7 @@ export default function ReviewsPage() {
             <div className="processing-detail">
               <div><strong title={job.sourcePath}>{fileName(job.sourcePath)}</strong><Badge tone={jobTone(job)}>{jobLabel(job)}</Badge></div>
               <small>{related ? `${related.company} · ${related.role}` : "关联投递已删除"} · {sessionTime(job.createdAt)}{job.characterCount ? ` · ${job.characterCount.toLocaleString()} 字` : ""}</small>
-              {isRunning && <p className="processing-progress"><span><i/></span><Clock3 size={13}/>已用时 {formatDuration(elapsed)} · {remaining > 0 ? `按同类任务估算还需约 ${formatDuration(remaining)}` : "已超过历史估算，服务仍在处理"}</p>}
+              {isRunning && <p className="processing-progress"><span><i className={chunkProgress !== undefined ? "is-determinate" : ""} style={chunkProgress !== undefined ? { width: `${chunkProgress}%` } : undefined}/></span><Clock3 size={13}/>{job.progressMessage ? `${job.progressMessage} · 已用时 ${formatDuration(elapsed)}` : `已用时 ${formatDuration(elapsed)} · ${remaining > 0 ? `按同类任务估算还需约 ${formatDuration(remaining)}` : "已超过历史估算，服务仍在处理"}`}</p>}
               {error && <p className="field-error">{error}</p>}
               {job.textPreview && job.status === "succeeded" && <p className="processing-preview">{job.textPreview}{job.characterCount && job.characterCount > 240 ? "…" : ""}</p>}
             </div>
@@ -234,7 +266,10 @@ export default function ReviewsPage() {
         })}</div>
         {processingJobsHasMore && <button className="review-processing-more" onClick={loadMoreProcessingJobs}>加载更早的处理记录</button>}
       </Card>
+      </div>
 
+      <div className="review-record-content">
+      {processingError && <div className="review-record-error"><span>{processingError}</span><button className="icon-button" title="关闭" onClick={() => setProcessingError("")}><X size={14}/></button></div>}
       {selected && application ? <>
         <Card className="review-summary"><div><Badge tone={selected.type === "真实面试" ? "blue" : "purple"}>{selected.type}</Badge><h2>{application.company} · {application.role}</h2><p>{selected.round} · {sessionTime(selected.createdAt)} · {selected.duration}</p>{selected.reviewSummary && <small className="review-overall-summary">{selected.reviewSummary}</small>}</div><div className="review-summary-actions"><div className="review-score"><strong>{averageScore ?? "—"}</strong><span>平均分<small>{scored.length}/{selected.questions.length} 题已评价</small></span></div>{selected.status !== "进行中" && <button className="button button--primary" disabled={reviewing || deletingSession} onClick={async () => { setReviewing(true); setProcessingError(""); try { const confirmed = await requestAiSendConfirmation("将把本场问题与回答发给 AI 服务进行逐题评价。是否继续？"); if (confirmed) await reviewSession(selected.id, confirmed); } catch (reason) { setProcessingError(String(reason)); } finally { setReviewing(false); } }}><Sparkles size={14}/>{reviewing ? "复盘生成中…" : selected.status === "复盘完成" ? "重新生成复盘" : "生成 AI 复盘"}</button>}<button className="icon-button danger-text" title="删除面试记录" disabled={deletingSession || reviewing} onClick={() => void removeSession(selected)}><Trash2 size={15}/></button></div></Card>
         <div className="review-question-heading"><div><h3>逐题记录</h3><p>问题和回答放在一起，方便回看每道题的表现</p></div><span>{selected.questions.length} 道题</span></div>
@@ -243,7 +278,9 @@ export default function ReviewsPage() {
           <div className="answer-block"><div><MessageSquareText size={16}/><strong>回答</strong></div><p>{question.answer || "本题未作答"}</p></div>
           <div className="ai-evaluation"><div><Sparkles size={16}/><strong>AI 评价</strong></div><p>{question.evaluation ?? (selected.status === "进行中" ? "本场尚未完成。" : "点击上方“生成 AI 复盘”，根据真实回答生成评价与分数。")}</p></div>
         </Card>)}</div>
-      </> : <Card><div className="interview-empty"><Mic2 size={32}/><h3>暂无面试记录</h3><p>完成模拟面试，或从上方已确认的材料生成真实面试记录后，会在这里展示逐题内容。</p></div></Card>}
+      </> : <Card><div className="interview-empty"><Mic2 size={32}/><h3>暂无面试记录</h3><p>完成模拟面试，或前往“材料处理”生成真实面试记录后，会在这里展示逐题内容。</p></div></Card>}
+      </div>
+    </div>
     </div>
 
     {editor && <div className="modal-backdrop" onMouseDown={() => !editor.saving && setEditor(undefined)}><div className="material-editor-modal" onMouseDown={(event) => event.stopPropagation()}>

@@ -86,4 +86,8 @@ pub struct ProcessingJobSummary {
     pub import_completed_at: Option<String>,
     pub text_preview: Option<String>,
     pub character_count: Option<i64>,
+    pub progress_phase: Option<String>,
+    pub progress_completed: Option<i64>,
+    pub progress_total: Option<i64>,
+    pub progress_message: Option<String>,
 }

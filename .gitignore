@@ -9,6 +9,9 @@ target/
 .env.local
 src-tauri/gen/
 **/gen/
+apps/desktop/src-tauri/.ffmpeg-cache/
+apps/desktop/src-tauri/binaries/ffmpeg-*.exe
+apps/desktop/src-tauri/binaries/ffmpeg-*.txt
 marketing/
 md/
 

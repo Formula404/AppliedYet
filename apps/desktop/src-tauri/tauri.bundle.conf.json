@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
+    "resources": [
+      "binaries/ffmpeg-LICENSE.txt",
+      "binaries/ffmpeg-README.txt",
+      "third-party/ffmpeg/NOTICE.txt"
+    ]
+  }
+}

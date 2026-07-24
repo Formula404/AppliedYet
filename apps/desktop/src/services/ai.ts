@@ -60,6 +60,10 @@ export interface ProcessingJobSummary {
   importCompletedAt?: string;
   textPreview?: string;
   characterCount?: number;
+  progressPhase?: "preparing" | "transcribing" | "merging" | "completed";
+  progressCompleted?: number;
+  progressTotal?: number;
+  progressMessage?: string;
 }
 export const parseDocument = (path: string, applicationId?: string) => invoke<ProcessingJobResult>("parse_document", { path, applicationId });
 export const transcribeAudio = (path: string, applicationId?: string) => invoke<ProcessingJobResult>("transcribe_audio", { path, applicationId });

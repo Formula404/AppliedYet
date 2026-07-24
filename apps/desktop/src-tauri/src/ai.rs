@@ -448,17 +448,30 @@ pub async fn import_interview_transcript(
         for repair in 0..2 {
             attempts += 1;
             let schema_fallback = repair > 0 && schema_transport_is_unsupported(&last_error);
+            let repair_note = if repair == 0 {
+                String::new()
+            } else if schema_fallback {
+                format!(
+                    "\n当前服务不支持 JSON Schema 请求参数，请直接按以下 Schema 输出纯 JSON：\n{}",
+                    schema
+                )
+            } else {
+                format!(
+                    "\n上一次输出无法解析（{}）。请重新输出完整 JSON；round、question、answer 的值必须都是字符串，questions 必须是数组。不要把字段值包装成对象。",
+                    truncate(&last_error, 500)
+                )
+            };
             match request_text(
                 &settings,
                 &api_key,
                 &model,
                 "你是面试记录整理助手。只能忠实整理输入材料，不得补写没有出现的问题或答案；只输出 JSON。",
-                &user,
+                &format!("{user}{repair_note}"),
                 (!schema_fallback).then(|| schema.clone()),
             )
             .await
             {
-                Ok(text) => match serde_json::from_str::<TranscriptInterview>(strip_json_fence(&text)) {
+                Ok(text) => match parse_transcript_interview(&text) {
                     Ok(result)
                         if !result.questions.is_empty()
                             && result.questions.len() <= crate::MAX_INTERVIEW_QUESTIONS
@@ -610,6 +623,98 @@ fn strip_json_fence(value: &str) -> &str {
         .or_else(|| value.strip_prefix("```"))
         .unwrap_or(value);
     value.strip_suffix("```").unwrap_or(value).trim()
+}
+
+fn parse_transcript_interview(text: &str) -> Result<TranscriptInterview, String> {
+    let text = strip_json_fence(text);
+    match serde_json::from_str::<TranscriptInterview>(text) {
+        Ok(result) => Ok(result),
+        Err(strict_error) => {
+            let value: Value = serde_json::from_str(text).map_err(|_| strict_error.to_string())?;
+            normalize_transcript_interview(&value).ok_or_else(|| strict_error.to_string())
+        }
+    }
+}
+
+fn normalize_transcript_interview(value: &Value) -> Option<TranscriptInterview> {
+    let (round, questions) = match value {
+        Value::Object(object) => {
+            let round = ["round", "interviewRound", "title", "轮次"]
+                .iter()
+                .find_map(|key| object.get(*key).and_then(json_text))
+                .unwrap_or_default();
+            let questions = [
+                "questions",
+                "qaPairs",
+                "qa_pairs",
+                "questionAnswerPairs",
+                "items",
+                "records",
+                "问答",
+            ]
+            .iter()
+            .find_map(|key| object.get(*key))?;
+            (round, questions)
+        }
+        Value::Array(_) => (String::new(), value),
+        _ => return None,
+    };
+    let items: Vec<&Value> = match questions {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(items) => items.values().collect(),
+        _ => return None,
+    };
+    let questions = items
+        .into_iter()
+        .filter_map(normalize_transcript_question)
+        .collect::<Vec<_>>();
+    (!questions.is_empty()).then_some(TranscriptInterview { round, questions })
+}
+
+fn normalize_transcript_question(value: &Value) -> Option<TranscriptQuestion> {
+    let object = value.as_object()?;
+    let question = ["question", "prompt", "q", "问题", "提问"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(json_text))?;
+    if question.trim().is_empty() {
+        return None;
+    }
+    let answer = ["answer", "response", "a", "回答", "答案"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(json_text))
+        .unwrap_or_default();
+    Some(TranscriptQuestion { question, answer })
+}
+
+fn json_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.trim().to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        Value::Array(items) => {
+            let text = items
+                .iter()
+                .filter_map(json_text)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        Value::Object(object) => {
+            for key in [
+                "text", "content", "value", "name", "title", "label", "question", "answer",
+                "response", "问题", "回答",
+            ] {
+                if let Some(text) = object.get(key).and_then(json_text) {
+                    return Some(text);
+                }
+            }
+            if object.len() == 1 {
+                return object.values().next().and_then(json_text);
+            }
+            None
+        }
+        Value::Null => None,
+    }
 }
 
 pub(crate) fn candidate_models(settings: &AiProviderSettings) -> Vec<String> {
@@ -851,6 +956,78 @@ mod tests {
             extract_output_text(&value, "responses").as_deref(),
             Some("{\"summary\":\"ok\"}")
         );
+    }
+
+    #[test]
+    fn transcript_parser_accepts_strict_schema_output() {
+        let result = parse_transcript_interview(
+            r#"{"round":"一面","questions":[{"question":"什么是 RAG？","answer":"检索增强生成。"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(result.round, "一面");
+        assert_eq!(result.questions.len(), 1);
+        assert_eq!(result.questions[0].question, "什么是 RAG？");
+        assert_eq!(result.questions[0].answer, "检索增强生成。");
+    }
+
+    #[test]
+    fn transcript_parser_normalizes_object_wrapped_text() {
+        let result = parse_transcript_interview(
+            r#"{
+                "round":{"text":"技术一面"},
+                "questions":[
+                    {
+                        "question":{"content":"请介绍一个 AI 项目。"},
+                        "answer":{"text":"我做过企业知识库问答。"}
+                    },
+                    {
+                        "question":"什么是 RAG？",
+                        "answer":["先检索外部知识库。","再把结果交给模型生成答案。"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(result.round, "技术一面");
+        assert_eq!(result.questions.len(), 2);
+        assert_eq!(result.questions[0].question, "请介绍一个 AI 项目。");
+        assert_eq!(result.questions[0].answer, "我做过企业知识库问答。");
+        assert_eq!(
+            result.questions[1].answer,
+            "先检索外部知识库。\n再把结果交给模型生成答案。"
+        );
+    }
+
+    #[test]
+    fn transcript_parser_accepts_common_aliases_and_blank_answers() {
+        let result = parse_transcript_interview(
+            r#"{"interviewRound":"初面","qaPairs":[{"q":"为什么离职？"},{"问题":"期望薪资？","回答":""}]}"#,
+        )
+        .unwrap();
+        assert_eq!(result.round, "初面");
+        assert_eq!(result.questions.len(), 2);
+        assert_eq!(result.questions[0].answer, "");
+    }
+
+    #[test]
+    fn transcript_parser_accepts_snake_case_pairs_without_parsing_metadata() {
+        let result = parse_transcript_interview(
+            r#"{
+                "qa_pairs":[{"question":"什么是 RAG？","answer":"检索增强生成。"}],
+                "metadata":{"question":"伪造的问题","answer":"伪造的回答"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(result.questions.len(), 1);
+        assert_eq!(result.questions[0].question, "什么是 RAG？");
+    }
+
+    #[test]
+    fn transcript_parser_rejects_objects_without_a_question_collection() {
+        let result = parse_transcript_interview(
+            r#"{"metadata":{"question":"不应被解析的问题","answer":"不应被解析的回答"}}"#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
