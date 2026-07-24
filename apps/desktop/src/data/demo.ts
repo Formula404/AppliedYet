@@ -152,14 +152,34 @@ export const demoResumeQuestions = (count: number): PredictedQuestion[] => {
 
 export const demoMonthLabels = [monthLabel(-2), monthLabel(-1), monthLabel(0)];
 
+const demoBankItem = (
+  id: string,
+  prompt: string,
+  category: string,
+  bestAnswer: string,
+  mastery: QuestionBankItem["mastery"],
+  sources: string[],
+  realInterviewCount: number,
+  practiceCount: number,
+  referenceCount: number,
+  dayOffset: number,
+): QuestionBankItem => ({
+  id, prompt, category, bestAnswer, mastery, systemMastery: mastery, membershipStatus: "active",
+  realInterviewCount, askedCount: realInterviewCount, practiceCount, referenceCount,
+  companyCount: realInterviewCount, legacyCount: 0,
+  lastRealAskedAt: realInterviewCount ? iso(dayOffset) : undefined,
+  lastPracticedAt: practiceCount ? iso(dayOffset) : undefined,
+  createdAt: iso(dayOffset - 20), sources, needsReview: mastery === "待加强",
+});
+
 const demoBankItems: QuestionBankItem[] = [
-  { id: "bank-1", prompt: "介绍一下订单系统重构项目及你个人负责的部分。", category: "项目深挖", bestAnswer: "从原系统耦合问题出发，说明拆分思路、异步化方案以及个人在架构设计与压测中的具体工作。", mastery: "熟悉", source: "AI 简历题", occurrenceCount: 3, lastSeenAt: iso(-1) },
-  { id: "bank-2", prompt: "如何处理消息重复消费与最终一致性？", category: "专业知识", bestAnswer: "通过业务唯一键和状态机实现幂等，辅以消费日志和定时对账兜底。", mastery: "掌握", source: "真实面试", occurrenceCount: 5, lastSeenAt: iso(0) },
-  { id: "bank-3", prompt: "线上服务延迟突然升高，你会按什么顺序排查？", category: "专业知识", bestAnswer: "先确认变更与发布，再查监控定位资源瓶颈（CPU/内存/IO/网络），然后分析慢查询与 GC 日志。", mastery: "练习中", source: "面经", occurrenceCount: 2, lastSeenAt: iso(-3) },
-  { id: "bank-4", prompt: "讲一次你与团队意见不一致的经历。", category: "行为面试", bestAnswer: "使用 STAR 结构，说明分歧双方的诉求、你用数据推动决策的过程以及最终的量化成果。", mastery: "待加强", source: "AI 简历题", occurrenceCount: 1, lastSeenAt: iso(-5) },
-  { id: "bank-5", prompt: "如何证明 P99 延迟降低 38% 来自你的优化？", category: "项目深挖", bestAnswer: "明确基线测量口径，用 A/B 对比控制变量，展示优化前后的火焰图或耗时分布。", mastery: "熟悉", source: "AI 简历题", occurrenceCount: 2, lastSeenAt: iso(-2) },
-  { id: "bank-6", prompt: "对 JVM 内存模型和常见 GC 问题的理解。", category: "专业知识", bestAnswer: "解释堆分区、GC 算法选择依据，结合一次实际 GC 调优案例说明停顿分析与参数调整。", mastery: "练习中", source: "面经", occurrenceCount: 2, lastSeenAt: iso(-4) },
-  { id: "bank-7", prompt: "为什么选择这个岗位和公司？", category: "岗位动机", bestAnswer: "从技术方向、业务前景和个人成长三个角度组织，体现对公司和团队的真实了解。", mastery: "掌握", source: "真实面试", occurrenceCount: 4, lastSeenAt: iso(-1) },
+  demoBankItem("bank-1", "介绍一下订单系统重构项目及你个人负责的部分。", "项目深挖", "从原系统耦合问题出发，说明拆分思路、异步化方案以及个人在架构设计与压测中的具体工作。", "熟悉", ["AI 生成", "模拟练习"], 0, 3, 0, -1),
+  demoBankItem("bank-2", "如何处理消息重复消费与最终一致性？", "专业知识", "通过业务唯一键和状态机实现幂等，辅以消费日志和定时对账兜底。", "掌握", ["真实面试", "模拟练习"], 3, 5, 0, 0),
+  demoBankItem("bank-3", "线上服务延迟突然升高，你会按什么顺序排查？", "专业知识", "先确认变更与发布，再查监控定位资源瓶颈（CPU/内存/IO/网络），然后分析慢查询与 GC 日志。", "练习中", ["面经", "模拟练习"], 0, 2, 4, -3),
+  demoBankItem("bank-4", "讲一次你与团队意见不一致的经历。", "行为面试", "使用 STAR 结构，说明分歧双方的诉求、你用数据推动决策的过程以及最终的量化成果。", "待加强", ["AI 生成"], 0, 1, 0, -5),
+  demoBankItem("bank-5", "如何证明 P99 延迟降低 38% 来自你的优化？", "项目深挖", "明确基线测量口径，用 A/B 对比控制变量，展示优化前后的火焰图或耗时分布。", "熟悉", ["AI 生成", "模拟练习"], 0, 2, 0, -2),
+  demoBankItem("bank-6", "对 JVM 内存模型和常见 GC 问题的理解。", "专业知识", "解释堆分区、GC 算法选择依据，结合一次实际 GC 调优案例说明停顿分析与参数调整。", "练习中", ["面经"], 0, 0, 2, -4),
+  demoBankItem("bank-7", "为什么选择这个岗位和公司？", "岗位动机", "从技术方向、业务前景和个人成长三个角度组织，体现对公司和团队的真实了解。", "掌握", ["真实面试"], 2, 4, 0, -1),
 ];
 
 export const listDemoQuestionBankItems = async (): Promise<QuestionBankItem[]> => demoBankItems.map((item) => ({ ...item }));

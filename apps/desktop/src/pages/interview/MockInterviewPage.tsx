@@ -32,7 +32,7 @@ export default function MockInterviewPage() {
   const question = session?.questions[questionIndex];
   const sessionApplication = applications.find((item) => item.id === session?.applicationId);
 
-  useEffect(() => { if (hasLocalDatabase) listQuestionBankItems().then(setBankItems).catch(() => undefined); }, []);
+  useEffect(() => { if (hasLocalDatabase) listQuestionBankItems({ pageSize: 100 }).then((page) => setBankItems(page.items)).catch(() => undefined); }, []);
 
   if (!selected) return <Card><div className="interview-empty"><Mic2 size={32}/><h3>没有可模拟的岗位</h3><p>请先添加一个流程中的投递。</p></div></Card>;
 

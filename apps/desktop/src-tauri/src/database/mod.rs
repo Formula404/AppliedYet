@@ -15,7 +15,9 @@ pub use email::{
     EmailLink, EmailMessage, EmailStats, EmailSyncCursor, EmailSyncFailure, RawEmail, SyncResult,
 };
 pub use interviews::{
-    CreateInterviewQuestion, InterviewQuestionReview, InterviewSessionRecord, QuestionBankItem,
+    CreateInterviewQuestion, InterviewQuestionReview, InterviewSessionRecord,
+    ListQuestionBankInput, MergeQuestionInput, QuestionBankDetail, QuestionBankItem,
+    QuestionBankPage, QuestionMatchCandidate, SplitQuestionInput,
 };
 use migrations::MIGRATIONS;
 pub use models::{
@@ -1910,6 +1912,7 @@ impl Database {
             )
             .map_err(db_error)?;
         drop(connection);
+        self.sync_experience_question_observations(&id)?;
         self.get_interview_experience_source(&id)
     }
 
@@ -1935,6 +1938,7 @@ impl Database {
             )
             .map_err(db_error)?;
         drop(connection);
+        self.sync_experience_question_observations(&id)?;
         self.get_interview_experience_source(&id)
     }
 
@@ -1968,6 +1972,7 @@ impl Database {
             return Err("待分析的网页面经不存在".into());
         }
         drop(connection);
+        self.sync_experience_question_observations(id)?;
         self.get_interview_experience_source(id)
     }
 
@@ -2013,6 +2018,7 @@ impl Database {
             return Err("面经来源不存在".into());
         }
         drop(connection);
+        self.sync_experience_question_observations(id)?;
         self.get_interview_experience_source(id)
     }
 
@@ -3760,10 +3766,29 @@ mod tests {
                 ],
             )
             .unwrap();
+        let empty_bank = db
+            .list_question_bank_items(&ListQuestionBankInput {
+                query: String::new(),
+                status: "active".into(),
+                review_state: None,
+                mastery: vec![],
+                sort: "review_priority".into(),
+                direction: "desc".into(),
+                page_size: 30,
+                cursor: None,
+            })
+            .unwrap();
+        assert!(empty_bank.items.is_empty());
         db.update_interview_session_answer(
             &session.id,
             &session.questions[0].id,
             "使用业务唯一键和数据库唯一约束。",
+        )
+        .unwrap();
+        db.update_interview_session_answer(
+            &session.id,
+            &session.questions[0].id,
+            "使用业务唯一键、状态机和数据库唯一约束。",
         )
         .unwrap();
         db.update_interview_session_progress(&session.id, 1)
@@ -3793,9 +3818,137 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reviewed.status, "复盘完成");
-        let bank = db.list_question_bank_items().unwrap();
-        assert_eq!(bank.len(), 2);
-        assert!(bank.iter().any(|item| item.mastery == "熟悉"));
+        let bank = db
+            .list_question_bank_items(&ListQuestionBankInput {
+                query: String::new(),
+                status: "active".into(),
+                review_state: None,
+                mastery: vec![],
+                sort: "review_priority".into(),
+                direction: "desc".into(),
+                page_size: 30,
+                cursor: None,
+            })
+            .unwrap();
+        assert_eq!(bank.items.len(), 1);
+        assert!(bank.items.iter().any(|item| item.mastery == "熟悉"));
+        assert_eq!(bank.items[0].practice_count, 1);
+        db.delete_interview_session(&session.id).unwrap();
+        let after_delete = db
+            .list_question_bank_items(&ListQuestionBankInput {
+                query: String::new(),
+                status: "active".into(),
+                review_state: None,
+                mastery: vec![],
+                sort: "review_priority".into(),
+                direction: "desc".into(),
+                page_size: 30,
+                cursor: None,
+            })
+            .unwrap();
+        assert_eq!(after_delete.items[0].practice_count, 0);
+    }
+
+    #[test]
+    fn manual_question_has_zero_fact_counts_and_normalized_variants_match() {
+        let db = Database::in_memory().unwrap();
+        let saved = db
+            .save_question_bank_item(
+                None,
+                "Ｊａｖａ 线程池有哪些核心参数？",
+                "专业知识",
+                "",
+                "待加强",
+                false,
+            )
+            .unwrap();
+        assert_eq!(saved.real_interview_count, 0);
+        assert_eq!(saved.practice_count, 0);
+        assert_eq!(saved.reference_count, 0);
+        let due = db
+            .list_question_bank_items(&ListQuestionBankInput {
+                query: String::new(),
+                status: "active".into(),
+                review_state: Some("due".into()),
+                mastery: vec![],
+                sort: "review_priority".into(),
+                direction: "desc".into(),
+                page_size: 30,
+                cursor: None,
+            })
+            .unwrap();
+        assert_eq!(due.facets.due, 1);
+        assert_eq!(due.items[0].id, saved.id);
+        let candidates = db
+            .list_question_match_candidates("java 线程池有哪些核心参数?", None)
+            .unwrap();
+        assert_eq!(candidates[0].question.id, saved.id);
+        assert_eq!(candidates[0].score, 1.0);
+    }
+
+    #[test]
+    fn question_merge_is_reversible_and_keep_separate_suppresses_candidates() {
+        let db = Database::in_memory().unwrap();
+        let first = db
+            .save_question_bank_item(None, "如何实现乐观锁 吗", "专业知识", "", "待加强", false)
+            .unwrap();
+        assert!(db
+            .save_question_bank_item(None, "如何实现乐观锁吗", "专业知识", "", "待加强", false,)
+            .is_err());
+        let second = db
+            .save_question_bank_item(None, "如何实现乐观锁吗", "专业知识", "", "待加强", true)
+            .unwrap();
+        let third = db
+            .save_question_bank_item(None, "如何实现悲观锁？", "专业知识", "", "待加强", false)
+            .unwrap();
+        let audit_id = db
+            .merge_question_bank_items(&MergeQuestionInput {
+                target_id: first.id.clone(),
+                source_id: second.id.clone(),
+                display_prompt: first.prompt.clone(),
+                reason: "测试合并".into(),
+            })
+            .unwrap();
+        assert!(db.get_question_bank_item(&second.id).is_err());
+        assert!(db
+            .merge_question_bank_items(&MergeQuestionInput {
+                target_id: second.id.clone(),
+                source_id: third.id.clone(),
+                display_prompt: second.prompt.clone(),
+                reason: "不应允许合并到重定向题".into(),
+            })
+            .is_err());
+        assert_eq!(
+            db.get_question_bank_item(&third.id).unwrap().item.id,
+            third.id
+        );
+        db.undo_question_merge(&audit_id).unwrap();
+        assert_eq!(
+            db.get_question_bank_item(&second.id).unwrap().item.id,
+            second.id
+        );
+        let inconsistent_variant_links: i64 = db
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM question_observations observation
+                 JOIN question_variants variant ON variant.id=observation.variant_id
+                 WHERE observation.question_id<>variant.question_id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inconsistent_variant_links, 0);
+        db.resolve_question_match(&first.id, &second.id, "keep_separate", "考察意图不同")
+            .unwrap();
+        let candidates = db
+            .list_question_match_candidates(&second.prompt, Some(&second.id))
+            .unwrap();
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.question.id != first.id));
     }
 
     fn detail_input() -> UpdateApplicationDetailInput {

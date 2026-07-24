@@ -6328,6 +6328,50 @@ textarea { resize: vertical; }
   color: var(--red)
 }
 
+.question-bank-stat-link {
+  color: var(--text);
+  text-align: left;
+  font-size: 13px
+}
+
+.question-bank-stat-link:hover {
+  color: var(--primary)
+}
+
+.question-bank-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border)
+}
+
+.question-bank-pagination span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 13px
+}
+
+.question-bank-pagination button,
+.question-bank-pagination select {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px 9px
+}
+
+.question-bank-pagination button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px
+}
+
+.question-bank-pagination button:disabled {
+  opacity: .45
+}
+
 .question-bank-empty {
   padding: 34px;
   color: var(--text-placeholder);
@@ -6337,6 +6381,90 @@ textarea { resize: vertical; }
 
 .question-bank-dialog {
   width: min(620px, calc(100vw - 40px))
+}
+
+.question-bank-detail {
+  max-height: min(760px, 86vh);
+  overflow: auto
+}
+
+.question-bank-evidence {
+  padding: 0 24px 24px
+}
+
+.question-bank-evidence h3 {
+  margin: 18px 0 8px;
+  font-size: 14px
+}
+
+.question-bank-evidence>p {
+  margin: 6px 0;
+  padding: 9px 11px;
+  border-radius: 7px;
+  background: var(--soft)
+}
+
+.question-bank-evidence>div {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 5px 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border)
+}
+
+.question-bank-evidence>div small {
+  grid-column: 3;
+  color: var(--muted)
+}
+
+.question-bank-evidence .question-match-detail {
+  grid-template-columns: 1fr auto
+}
+
+.question-match-detail>span:first-child small {
+  display: block;
+  color: var(--muted)
+}
+
+.question-match-detail button,
+.question-bank-undo button {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  margin-left: 8px
+}
+
+.question-bank-undo {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--text)
+}
+
+.question-match-suggestions {
+  padding: 12px;
+  border: 1px solid var(--warning);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--warning) 8%, transparent)
+}
+
+.question-match-suggestions>div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0
+}
+
+.question-match-suggestions>div span {
+  flex: 1
+}
+
+.question-match-suggestions small {
+  display: block;
+  color: var(--muted);
+  margin-top: 3px
 }
 
 .question-bank-form {
@@ -6384,6 +6512,223 @@ textarea { resize: vertical; }
   gap: 10px;
   padding-top: 18px;
   border-top: 1px solid var(--border)
+}
+
+.question-bank-table--simple table {
+  min-width: 820px;
+  table-layout: fixed
+}
+
+.question-bank-col-question {
+  width: auto
+}
+
+.question-bank-col-type {
+  width: 110px
+}
+
+.question-bank-col-practice {
+  width: 160px
+}
+
+.question-bank-col-mastery {
+  width: 145px
+}
+
+.question-bank-col-actions {
+  width: 104px
+}
+
+.question-bank-table--simple td:first-child strong {
+  min-width: 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere
+}
+
+.question-bank-table--simple th:last-child,
+.question-bank-table--simple td:last-child {
+  width: auto
+}
+
+.question-bank-table--simple .question-bank-row-actions button:last-child:hover {
+  color: var(--primary)
+}
+
+.question-bank-practice {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left
+}
+
+.question-bank-practice>span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px
+}
+
+.question-bank-practice b {
+  font-size: 13px;
+  font-weight: 650
+}
+
+.question-bank-practice small {
+  color: var(--muted);
+  font-size: 9px
+}
+
+.question-bank-practice:hover b {
+  color: var(--primary)
+}
+
+.question-bank-mastery {
+  display: grid;
+  grid-template-columns: 48px auto;
+  align-items: center;
+  gap: 3px 8px
+}
+
+.question-bank-mastery small {
+  grid-column: 2;
+  color: var(--orange);
+  font-size: 9px
+}
+
+.question-bank-pagination--simple {
+  padding: 11px 16px
+}
+
+.question-bank-detail-body {
+  padding: 20px 24px 24px
+}
+
+.question-bank-detail-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden
+}
+
+.question-bank-detail-stats>span {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px
+}
+
+.question-bank-detail-stats>span+span {
+  border-left: 1px solid var(--border)
+}
+
+.question-bank-detail-stats b {
+  color: var(--text);
+  font-size: 18px
+}
+
+.question-bank-detail-stats small {
+  color: var(--muted);
+  font-size: 9px
+}
+
+.question-bank-detail-body section {
+  margin-top: 22px
+}
+
+.question-bank-detail-body h3 {
+  margin: 0 0 9px;
+  color: var(--text);
+  font-size: 12px
+}
+
+.question-bank-detail-body section>p,
+.question-bank-detail-body li {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.65
+}
+
+.question-bank-detail-body ul {
+  margin: 0;
+  padding-left: 18px
+}
+
+.question-bank-detail-body .muted {
+  color: var(--muted)
+}
+
+.question-bank-records article {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border)
+}
+
+.question-bank-records article>div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px
+}
+
+.question-bank-records article strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600
+}
+
+.question-bank-records article small {
+  color: var(--muted);
+  font-size: 9px
+}
+
+.question-bank-form>.question-match-suggestions {
+  display: block
+}
+
+.question-match-suggestions {
+  border-color: var(--border);
+  background: var(--soft)
+}
+
+.question-match-suggestions>strong {
+  color: var(--text);
+  font-size: 11px
+}
+
+.question-match-suggestions>div span {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.45
+}
+
+.question-match-create-anyway {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 4px 0
+}
+
+.question-match-create-anyway:hover {
+  color: var(--primary)
+}
+
+@media (max-width: 760px) {
+  .question-bank-toolbar {
+    align-items: stretch;
+    flex-direction: column
+  }
+
+  .question-bank-actions label {
+    flex: 1;
+    width: auto
+  }
 }
 
 @media (max-width: 900px) {

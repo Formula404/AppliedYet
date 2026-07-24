@@ -1,6 +1,10 @@
 use crate::{
     ai,
-    db::{CreateInterviewQuestion, Database, InterviewSessionRecord, QuestionBankItem},
+    db::{
+        CreateInterviewQuestion, Database, InterviewSessionRecord, ListQuestionBankInput,
+        MergeQuestionInput, QuestionBankDetail, QuestionBankItem, QuestionBankPage,
+        QuestionMatchCandidate, SplitQuestionInput,
+    },
 };
 use serde::Deserialize;
 
@@ -11,6 +15,8 @@ pub(crate) struct SaveQuestionBankInput {
     category: String,
     best_answer: String,
     mastery: String,
+    #[serde(default)]
+    force_new: bool,
 }
 
 #[tauri::command]
@@ -92,8 +98,17 @@ pub(crate) fn delete_interview_session(
 #[tauri::command]
 pub(crate) fn list_question_bank_items(
     db: tauri::State<'_, Database>,
-) -> Result<Vec<QuestionBankItem>, String> {
-    db.list_question_bank_items()
+    input: ListQuestionBankInput,
+) -> Result<QuestionBankPage, String> {
+    db.list_question_bank_items(&input)
+}
+
+#[tauri::command]
+pub(crate) fn get_question_bank_item(
+    db: tauri::State<'_, Database>,
+    id: String,
+) -> Result<QuestionBankDetail, String> {
+    db.get_question_bank_item(&id)
 }
 
 #[tauri::command]
@@ -108,6 +123,7 @@ pub(crate) fn save_question_bank_item(
         &input.category,
         &input.best_answer,
         &input.mastery,
+        input.force_new,
     )
 }
 
@@ -117,4 +133,64 @@ pub(crate) fn delete_question_bank_item(
     id: String,
 ) -> Result<(), String> {
     db.delete_question_bank_item(&id)
+}
+
+#[tauri::command]
+pub(crate) fn archive_question_bank_item(
+    db: tauri::State<'_, Database>,
+    id: String,
+) -> Result<(), String> {
+    db.archive_question_bank_item(&id)
+}
+
+#[tauri::command]
+pub(crate) fn restore_question_bank_item(
+    db: tauri::State<'_, Database>,
+    id: String,
+) -> Result<(), String> {
+    db.restore_question_bank_item(&id)
+}
+
+#[tauri::command]
+pub(crate) fn list_question_match_candidates(
+    db: tauri::State<'_, Database>,
+    prompt: String,
+    exclude_id: Option<String>,
+) -> Result<Vec<QuestionMatchCandidate>, String> {
+    db.list_question_match_candidates(&prompt, exclude_id.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn resolve_question_match(
+    db: tauri::State<'_, Database>,
+    left_id: String,
+    right_id: String,
+    action: String,
+    reason: String,
+) -> Result<Option<String>, String> {
+    db.resolve_question_match(&left_id, &right_id, &action, &reason)
+}
+
+#[tauri::command]
+pub(crate) fn merge_question_bank_items(
+    db: tauri::State<'_, Database>,
+    input: MergeQuestionInput,
+) -> Result<String, String> {
+    db.merge_question_bank_items(&input)
+}
+
+#[tauri::command]
+pub(crate) fn split_question_bank_item(
+    db: tauri::State<'_, Database>,
+    input: SplitQuestionInput,
+) -> Result<QuestionBankItem, String> {
+    db.split_question_bank_item(&input)
+}
+
+#[tauri::command]
+pub(crate) fn undo_question_merge(
+    db: tauri::State<'_, Database>,
+    audit_id: String,
+) -> Result<(), String> {
+    db.undo_question_merge(&audit_id)
 }
